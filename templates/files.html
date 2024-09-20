@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+        }
+
+        th {
+            background-color: #f4f4f4;
+        }
+
+        input[type="text"] {
+            width: 300px;
+            padding: 8px;
+            margin: 10px 0;
+        }
+
+    </style>
+    <script>
+        // Optional client-side filtering
+        function dynamicFilter() {
+            const input = document.getElementById('searchInput');
+            const filter = input.value.toLowerCase();
+            const rows = document.querySelectorAll('tbody tr');
+
+            rows.forEach(row => {
+                const fileNameCell = row.querySelector('td:nth-child(2)');
+                const fileName = fileNameCell.textContent.toLowerCase();
+                if (fileName.includes(filter)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+    Download CSV: <a href="/download">here</a>
+    <form method="get" action="/{{ search_route }}">
+        <input type="text" id="searchInput" name="search" onkeyup="dynamicFilter()" value="{{ search_query }}" placeholder="Search by hash or filename">
+        <button type="submit">Search</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>Hash</th>
+                <th>Filename</th>
+                <th>Size</th>
+                <th>Last Modified</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for file in files %}
+            <tr>
+                <td>{{ file[1] }}</td>
+                <td>{{ file[2] }}</td>
+                <td>{{ file[3] }}</td>
+                <td>{{ file[4] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
