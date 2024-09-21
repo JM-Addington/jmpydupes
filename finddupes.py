@@ -34,6 +34,19 @@ def close_db_connection(conn):
         conn.close()
 
 def process_file(file_path):
+    
+    # Check to see if the file still exists, if not, print an info message and remove it from the database
+    if not os.path.exists(file_path):
+        print(f"PyDupes: {file_path} no longer exists, removing from database")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        DELETE FROM files WHERE path = ?
+        ''', (file_path,))
+        conn.commit()
+        close_db_connection(conn)
+        return None
+    
     file_path = Path(file_path).resolve()  # Get the full path
     print(f"PyDupes: Processing {file_path}")
     
@@ -104,6 +117,30 @@ def walk_directory(directory):
         
         # Handle permission errors for directories
         dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
+        
+# Rescan duplicates
+def rescan_duplicates():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT hash, path FROM files
+    WHERE hash IN (
+        SELECT hash FROM files
+        GROUP BY hash
+        HAVING COUNT(*) > 1
+    )
+    ORDER BY hash
+    ''')
+    duplicates = cursor.fetchall()
+    close_db_connection(conn)
+    
+    # Rescan each duplicate file, no thread pool
+    for duplicate in duplicates:
+        data = process_file(duplicate[1])
+        if data is not None:
+            insert_data(data)
+    
+    return duplicates
 
 def main(directory):
     # Create database and table if they don't exist
@@ -119,6 +156,12 @@ def main(directory):
 
 
 if __name__ == "__main__":
+    
+    # if flag --rescan-duplicates is passed, rescan duplicates. Do not process any directory
+    if len(sys.argv) == 2 and sys.argv[1] == "--rescan-duplicates":
+        rescan_duplicates()
+        sys.exit(0)
+    
     if len(sys.argv) < 2:
         print("Usage: python script.py <directory_to_process>")
         sys.exit(1)

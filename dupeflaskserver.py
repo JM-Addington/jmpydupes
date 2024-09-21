@@ -103,11 +103,11 @@ def generate_sort_urls(route, current_sort, current_direction):
 
 @app.route('/', methods=['GET'])
 def show_duplicates():
-    exclude_hidden = request.args.get('exclude_hidden', 'false') == 'true'
-    exclude_small = request.args.get('exclude_small', 'false') == 'true'
+    exclude_hidden = request.args.get('exclude_hidden', 'true') == 'true'
+    exclude_small = request.args.get('exclude_small', 'true') == 'true'
     exclude_patterns = request.args.get('exclude_patterns', '')
-    sort_by = request.args.get('sort_by', 'hash')  # Default sort field
-    direction = request.args.get('direction', 'asc')  # Default sort order
+    sort_by = request.args.get('sort_by', 'hash')
+    direction = request.args.get('direction', 'asc')
 
     sort_column, order = get_sort_column_and_order(sort_by, direction)
 
@@ -118,11 +118,13 @@ def show_duplicates():
     ORDER BY {sort_column} {order}, hash, path
     ''')
 
-    # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
     stats = calculate_statistics(files)
     
     sort_urls = generate_sort_urls("/", sort_by, direction)
+
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return render_template('partials/file_list.html', files=files)
 
     return render_template('files.html', files=files, stats=stats, title="Duplicate Files", search_route="/",
                            exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns,
@@ -131,11 +133,11 @@ def show_duplicates():
 @app.route('/search', methods=['GET'])
 def search_files():
     search_query = request.args.get('search', '').strip()
-    exclude_hidden = request.args.get('exclude_hidden', 'false') == 'true'
-    exclude_small = request.args.get('exclude_small', 'false') == 'true'
+    exclude_hidden = request.args.get('exclude_hidden', 'true') == 'true'
+    exclude_small = request.args.get('exclude_small', 'true') == 'true'
     exclude_patterns = request.args.get('exclude_patterns', '')
-    sort_by = request.args.get('sort_by', 'hash')  # Default sort field
-    direction = request.args.get('direction', 'asc')  # Default sort order
+    sort_by = request.args.get('sort_by', 'hash')
+    direction = request.args.get('direction', 'asc')
 
     sort_column, order = get_sort_column_and_order(sort_by, direction)
 
@@ -151,11 +153,13 @@ def search_files():
         ORDER BY {sort_column} {order}, hash, path
         ''')
 
-    # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
     stats = calculate_statistics(files)
     
     sort_urls = generate_sort_urls("/search", sort_by, direction)
+
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return render_template('partials/file_list.html', files=files)
 
     return render_template('files.html', files=files, stats=stats, title="Search Files", search_route="/search",
                            search_query=search_query, exclude_hidden=exclude_hidden, exclude_small=exclude_small,

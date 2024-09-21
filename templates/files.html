@@ -28,14 +28,48 @@
         }
 
     </style>
+
+    <head>
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script>
+            $(document).ready(function() {
+                $('form').submit(function(event) {
+                    event.preventDefault();
+                    var form = $(this);
+                    $.ajax({
+                        type: "GET",
+                        url: form.attr('action'),
+                        data: form.serialize(),
+                        success: function(data) {
+                            $('#fileList').html(data);
+                        }
+                    });
+                });
+        
+                // Update sorting links for AJAX
+                $('th').click(function(event) {
+                    event.preventDefault();
+                    var url = $(this).find('a').attr('href');
+                    $.ajax({
+                        type: "GET",
+                        url: url,
+                        success: function(data) {
+                            $('#fileList').html(data);
+                        }
+                    });
+                });
+            });
+        </script>
+    </head>
+
 </head>
 <body>
     <h1>{{ title }}</h1>
     <p>Download CSV: <a href="/download">here</a></p>
     <form method="get" action="{{ search_route }}">
         <input type="text" id="searchInput" name="search" value="{{ search_query }}" placeholder="Search by hash or filename">
-        <label><input type="checkbox" name="exclude_hidden" value="true" {% if exclude_hidden %}checked{% endif %}> Exclude hidden directories</label>
-        <label><input type="checkbox" name="exclude_small" value="true" {% if exclude_small %}checked{% endif %}> Exclude files < 10kb</label>
+        <label><input type="checkbox" name="exclude_hidden" value="true" checked> Exclude hidden directories</label>
+        <label><input type="checkbox" name="exclude_small" value="true" checked> Exclude files < 10kb</label>
         <br>
         <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)">
         <br>

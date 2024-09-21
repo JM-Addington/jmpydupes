@@ -1,0 +1,10 @@
+<tbody>
+    {% for file in files %}
+    <tr>
+        <td>{{ file[1] }}</td>
+        <td>{{ file[2] }}</td>
+        <td>{{ file[3] | sizeof_fmt }}</td>
+        <td>{{ file[4] }}</td>
+    </tr>
+    {% endfor %}
+</tbody>
