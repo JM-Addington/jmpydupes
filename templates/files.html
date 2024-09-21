@@ -18,6 +18,7 @@
 
         th {
             background-color: #f4f4f4;
+            cursor: pointer;
         }
 
         input[type="text"] {
@@ -31,12 +32,13 @@
 <body>
     <h1>{{ title }}</h1>
     <p>Download CSV: <a href="/download">here</a></p>
-    <form method="get" action="/{{ search_route }}">
+    <form method="get" action="{{ search_route }}">
         <input type="text" id="searchInput" name="search" value="{{ search_query }}" placeholder="Search by hash or filename">
         <label><input type="checkbox" name="exclude_hidden" value="true" {% if exclude_hidden %}checked{% endif %}> Exclude hidden directories</label>
         <label><input type="checkbox" name="exclude_small" value="true" {% if exclude_small %}checked{% endif %}> Exclude files < 10kb</label>
         <br>
-        <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)"><br>
+        <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)">
+        <br>
         <button type="submit">Apply Filters</button>
     </form>
 
@@ -54,9 +56,9 @@
     <table>
         <thead>
             <tr>
-                <th>Hash</th>
-                <th>Filename</th>
-                <th>Size</th>
+                <th onclick="location.href='{{ sort_urls.hash }}'">Hash</th>
+                <th onclick="location.href='{{ sort_urls.path }}'">Filename</th>
+                <th onclick="location.href='{{ sort_urls.size }}'">Size</th>
                 <th>Last Modified</th>
             </tr>
         </thead>

@@ -82,25 +82,51 @@ def calculate_statistics(files):
 # Register sizeof_fmt function as a template filter
 app.jinja_env.filters['sizeof_fmt'] = sizeof_fmt
 
+def get_sort_column_and_order(sort_by, direction):
+    # Map the sort_by string to actual database field names and determine the order
+    sort_columns = {
+        'size': 'size',
+        'hash': 'hash',
+        'path': 'path'
+    }
+    sort_column = sort_columns.get(sort_by, 'hash')  # Default to hash if invalid input
+    order = 'ASC' if direction == 'asc' else 'DESC'
+    return sort_column, order
+
+def generate_sort_urls(route, current_sort, current_direction):
+    toggle_direction = 'desc' if current_direction == 'asc' else 'asc'
+    return {
+        'hash': f"{route}?sort_by=hash&direction={toggle_direction}",
+        'path': f"{route}?sort_by=path&direction={toggle_direction}",
+        'size': f"{route}?sort_by=size&direction={toggle_direction}"
+    }
+
 @app.route('/', methods=['GET'])
 def show_duplicates():
     exclude_hidden = request.args.get('exclude_hidden', 'false') == 'true'
     exclude_small = request.args.get('exclude_small', 'false') == 'true'
     exclude_patterns = request.args.get('exclude_patterns', '')
+    sort_by = request.args.get('sort_by', 'hash')  # Default sort field
+    direction = request.args.get('direction', 'asc')  # Default sort order
 
-    files = query_db('''
+    sort_column, order = get_sort_column_and_order(sort_by, direction)
+
+    files = query_db(f'''
     SELECT * FROM files
     WHERE hash IN 
     (SELECT hash FROM files GROUP BY hash HAVING COUNT(*) > 1)
-    ORDER BY hash, path
+    ORDER BY {sort_column} {order}, hash, path
     ''')
 
     # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
     stats = calculate_statistics(files)
+    
+    sort_urls = generate_sort_urls("/", sort_by, direction)
 
-    return render_template('files.html', files=files, stats=stats, title="Duplicate Files", search_route="duplicates",
-                           exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns)
+    return render_template('files.html', files=files, stats=stats, title="Duplicate Files", search_route="/",
+                           exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns,
+                           sort_by=sort_by, direction=direction, sort_urls=sort_urls)
 
 @app.route('/search', methods=['GET'])
 def search_files():
@@ -108,21 +134,32 @@ def search_files():
     exclude_hidden = request.args.get('exclude_hidden', 'false') == 'true'
     exclude_small = request.args.get('exclude_small', 'false') == 'true'
     exclude_patterns = request.args.get('exclude_patterns', '')
+    sort_by = request.args.get('sort_by', 'hash')  # Default sort field
+    direction = request.args.get('direction', 'asc')  # Default sort order
+
+    sort_column, order = get_sort_column_and_order(sort_by, direction)
 
     if search_query:
-        files = query_db('''
+        files = query_db(f'''
         SELECT * FROM files
-        WHERE hash LIKE ? OR path LIKE ?
+        WHERE (hash LIKE ? OR path LIKE ?)
+        ORDER BY {sort_column} {order}, hash, path
         ''', (f'%{search_query}%', f'%{search_query}%'))
     else:
-        files = query_db('SELECT * FROM files')
+        files = query_db(f'''
+        SELECT * FROM files
+        ORDER BY {sort_column} {order}, hash, path
+        ''')
 
     # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
     stats = calculate_statistics(files)
+    
+    sort_urls = generate_sort_urls("/search", sort_by, direction)
 
-    return render_template('files.html', files=files, stats=stats, title="Search Files", search_route="search",
-                           search_query=search_query, exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns)
+    return render_template('files.html', files=files, stats=stats, title="Search Files", search_route="/search",
+                           search_query=search_query, exclude_hidden=exclude_hidden, exclude_small=exclude_small,
+                           exclude_patterns=exclude_patterns, sort_by=sort_by, direction=direction, sort_urls=sort_urls)
 
 @app.route('/download', methods=['GET'])
 def download_csv():
