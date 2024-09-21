@@ -8,7 +8,7 @@
         table {
             width: 100%;
             border-collapse: collapse;
-            margin: 20px 0;
+            margin: 10px 0;
         }
 
         th, td {
@@ -30,8 +30,8 @@
 </head>
 <body>
     <h1>{{ title }}</h1>
-    Download CSV: <a href="/download">here</a>
-    <form method="get" action="/">
+    <p>Download CSV: <a href="/download">here</a></p>
+    <form method="get" action="/{{ search_route }}">
         <input type="text" id="searchInput" name="search" value="{{ search_query }}" placeholder="Search by hash or filename">
         <label><input type="checkbox" name="exclude_hidden" value="true" {% if exclude_hidden %}checked{% endif %}> Exclude hidden directories</label>
         <label><input type="checkbox" name="exclude_small" value="true" {% if exclude_small %}checked{% endif %}> Exclude files < 10kb</label>
@@ -39,6 +39,18 @@
         <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)"><br>
         <button type="submit">Apply Filters</button>
     </form>
+
+    <h2>Statistics</h2>
+    <table>
+        <tr><th>Total Bytes</th><td>{{ stats.total_bytes }}</td></tr>
+        <tr><th>Total Files</th><td>{{ stats.total_files }}</td></tr>
+        <tr><th colspan="2">Top 10 File Types by Size</th></tr>
+        {% for ext, size in stats.top_file_types %}
+        <tr><td>{{ ext if ext else '[No Extension]' }}</td><td>{{ size }}</td></tr>
+        {% endfor %}
+    </table>
+
+    <h2>Files</h2>
     <table>
         <thead>
             <tr>
@@ -53,7 +65,7 @@
             <tr>
                 <td>{{ file[1] }}</td>
                 <td>{{ file[2] }}</td>
-                <td>{{ file[3] }}</td>
+                <td>{{ file[3] | sizeof_fmt }}</td>
                 <td>{{ file[4] }}</td>
             </tr>
             {% endfor %}

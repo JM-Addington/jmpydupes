@@ -51,7 +51,37 @@ def apply_filters(files, exclude_hidden, exclude_small, exclude_patterns):
     
     return filtered_files
 
-# Route for displaying all duplicate files
+def sizeof_fmt(num, suffix="B"):
+    """Convert a size in bytes to a human-readable string with appropriate unit."""
+    for unit in ["", "K", "M", "G", "T"]:
+        if abs(num) < 1024.0:
+            return f"{num:3.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f} P{suffix}"
+
+def calculate_statistics(files):
+    total_bytes = sum(file[3] for file in files)
+    total_files = len(files)
+
+    # Calculate top 10 file types by size
+    extension_size = {}
+    for file in files:
+        path = file[2]
+        size = file[3]
+        suffix = Path(path).suffix.lower()
+        extension_size[suffix] = extension_size.get(suffix, 0) + size
+    
+    top_file_types = sorted(extension_size.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "total_bytes": sizeof_fmt(total_bytes),
+        "total_files": total_files,
+        "top_file_types": [(ext, sizeof_fmt(size)) for ext, size in top_file_types]
+    }
+
+# Register sizeof_fmt function as a template filter
+app.jinja_env.filters['sizeof_fmt'] = sizeof_fmt
+
 @app.route('/', methods=['GET'])
 def show_duplicates():
     exclude_hidden = request.args.get('exclude_hidden', 'false') == 'true'
@@ -67,11 +97,11 @@ def show_duplicates():
 
     # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
+    stats = calculate_statistics(files)
 
-    return render_template('files.html', files=files, title="Duplicate Files", search_route="duplicates",
+    return render_template('files.html', files=files, stats=stats, title="Duplicate Files", search_route="duplicates",
                            exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns)
 
-# Route for searching any file by name or hash
 @app.route('/search', methods=['GET'])
 def search_files():
     search_query = request.args.get('search', '').strip()
@@ -89,8 +119,9 @@ def search_files():
 
     # Apply filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
+    stats = calculate_statistics(files)
 
-    return render_template('files.html', files=files, title="Search Files", search_route="search",
+    return render_template('files.html', files=files, stats=stats, title="Search Files", search_route="search",
                            search_query=search_query, exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns)
 
 @app.route('/download', methods=['GET'])
