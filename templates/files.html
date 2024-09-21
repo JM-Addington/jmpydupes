@@ -27,31 +27,17 @@
         }
 
     </style>
-    <script>
-        // Optional client-side filtering
-        function dynamicFilter() {
-            const input = document.getElementById('searchInput');
-            const filter = input.value.toLowerCase();
-            const rows = document.querySelectorAll('tbody tr');
-
-            rows.forEach(row => {
-                const fileNameCell = row.querySelector('td:nth-child(2)');
-                const fileName = fileNameCell.textContent.toLowerCase();
-                if (fileName.includes(filter)) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
-            });
-        }
-    </script>
 </head>
 <body>
     <h1>{{ title }}</h1>
     Download CSV: <a href="/download">here</a>
-    <form method="get" action="/{{ search_route }}">
-        <input type="text" id="searchInput" name="search" onkeyup="dynamicFilter()" value="{{ search_query }}" placeholder="Search by hash or filename">
-        <button type="submit">Search</button>
+    <form method="get" action="/">
+        <input type="text" id="searchInput" name="search" value="{{ search_query }}" placeholder="Search by hash or filename">
+        <label><input type="checkbox" name="exclude_hidden" value="true" {% if exclude_hidden %}checked{% endif %}> Exclude hidden directories</label>
+        <label><input type="checkbox" name="exclude_small" value="true" {% if exclude_small %}checked{% endif %}> Exclude files < 10kb</label>
+        <br>
+        <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)"><br>
+        <button type="submit">Apply Filters</button>
     </form>
     <table>
         <thead>
