@@ -320,40 +320,113 @@ def list_duplicates_csv(output_file, preferred_source_directory=None):
 
     return duplicates_info
 
-def delete_duplicates(preferred_source_directory=None):
+def delete_duplicates(preferred_source_directory=None, output_file=None,
+                      overwrite=False, append=False, simulate_delete=False):
     import os
+    import csv
+
     duplicates_list = get_duplicates(preferred_source_directory=preferred_source_directory)
-    files_deleted = []
 
-    for group in duplicates_list:
-        # Do not delete if there is no matching original
-        if group['no_matching_original']:
-            print(f"Skipping deletion for duplicates with hash {group['hash']} as no matching original path was found.")
-            continue
+    total_deleted = 0
 
-        for dup_info in group['duplicates']:
-            dup_file = dup_info['path']
-            try:
-                os.remove(dup_file)
-                print(f"Deleted duplicate file: {dup_file}")
-                files_deleted.append(dup_file)
-            except Exception as e:
-                print(f"Error deleting file {dup_file}: {e}", file=sys.stderr)
+    writer = None
+    csvfile = None
 
-    print(f"\nTotal duplicates deleted: {len(files_deleted)}")
-    return files_deleted
+    # Handle output file options
+    if output_file:
+        file_exists = os.path.isfile(output_file)
+        file_mode = 'w'
 
-def main(directory):
-    # Create database and table if they don't exist
-    create_db_and_table()
+        if file_exists:
+            if overwrite:
+                file_mode = 'w'
+            elif append:
+                file_mode = 'a'
+            else:
+                print(f"Error: Output file '{output_file}' already exists. Use --overwrite or --append to specify the desired behavior.", file=sys.stderr)
+                return
+        else:
+            file_mode = 'w'
 
-    # Get all files in the specified directory and subdirectories
-    files = walk_directory(directory)
+        try:
+            csvfile = open(output_file, file_mode, newline='', encoding='utf-8')
+            fieldnames = ['status', 'path', 'hash']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            if file_mode == 'w' or (file_mode == 'a' and os.stat(output_file).st_size == 0):
+                writer.writeheader()
+                csvfile.flush()
+        except Exception as e:
+            print(f"Error opening file {output_file}: {e}", file=sys.stderr)
+            writer = None
+            csvfile = None
 
-    for file in files:
-        data = process_file(file)
-        if data is not None:
-            insert_data(data)
+    try:
+        for group in duplicates_list:
+            original_file_info = group['original']
+            original_path = original_file_info['path']
+            if group['no_matching_original']:
+                status_flag = 'kept - no matching original'
+                print(f"Duplicate group with hash {group['hash']} has no matching original in specified directory.")
+            else:
+                status_flag = 'kept'
+                print(f"Original file for hash {group['hash']}: {original_path}")
+
+            # Log the original file
+            log_entry = {
+                'status': status_flag,
+                'path': original_path,
+                'hash': group['hash']
+            }
+            if writer:
+                writer.writerow(log_entry)
+                csvfile.flush()
+
+            if group['no_matching_original']:
+                # Log skipped duplicates
+                for dup_info in group['duplicates']:
+                    log_entry = {
+                        'status': 'skipped - no matching original',
+                        'path': dup_info['path'],
+                        'hash': group['hash']
+                    }
+                    if writer:
+                        writer.writerow(log_entry)
+                        csvfile.flush()
+            else:
+                for dup_info in group['duplicates']:
+                    dup_file = dup_info['path']
+                    try:
+                        if not simulate_delete:
+                            os.remove(dup_file)
+                            print(f"Deleted duplicate file: {dup_file}")
+                            status = 'deleted'
+                            total_deleted += 1
+                        else:
+                            print(f"Simulated deletion of duplicate file: {dup_file}")
+                            status = 'deleted (simulated)'
+                    except Exception as e:
+                        print(f"Error deleting file {dup_file}: {e}", file=sys.stderr)
+                        status = f'error - {e}'
+
+                    # Log the duplicate file
+                    log_entry = {
+                        'status': status,
+                        'path': dup_file,
+                        'hash': group['hash']
+                    }
+                    if writer:
+                        writer.writerow(log_entry)
+                        csvfile.flush()
+    finally:
+        # Ensure the CSV file is properly closed
+        if csvfile:
+            csvfile.close()
+
+    print(f"\nTotal duplicates deleted: {total_deleted}")
+
+    if simulate_delete:
+        print("Note: Deletion was simulated. No files were actually deleted.")
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process files and find duplicates.')
@@ -380,6 +453,11 @@ if __name__ == "__main__":
     # Subparser for the 'delete-duplicates' command
     parser_delete = subparsers.add_parser('delete-duplicates', help='Delete duplicate files')
     parser_delete.add_argument('--prefer-directory', help='Preferred source directory for selecting original files')
+    parser_delete.add_argument('-o', '--output', help='Output CSV file to log the deleted files')
+    group = parser_delete.add_mutually_exclusive_group()
+    group.add_argument('--overwrite', action='store_true', help='Overwrite the output file if it exists')
+    group.add_argument('--append', action='store_true', help='Append to the output file if it exists')
+    parser_delete.add_argument('--simulate-delete', action='store_true', help='Simulate deletion without actually deleting files')
 
     args = parser.parse_args()
 
@@ -396,6 +474,12 @@ if __name__ == "__main__":
     elif args.command == 'list-duplicates-csv':
         list_duplicates_csv(output_file=args.output, preferred_source_directory=args.prefer_directory)
     elif args.command == 'delete-duplicates':
-        delete_duplicates(preferred_source_directory=args.prefer_directory)
+        delete_duplicates(
+            preferred_source_directory=args.prefer_directory,
+            output_file=args.output,
+            overwrite=args.overwrite,
+            append=args.append,
+            simulate_delete=args.simulate_delete
+        )
     else:
         parser.print_help()
