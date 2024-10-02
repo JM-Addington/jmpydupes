@@ -7,6 +7,7 @@ import sys
 import datetime
 import traceback
 import argparse
+from pathlib import PurePath
 
 DB_NAME = 'file_data.db'
 
@@ -29,6 +30,10 @@ def create_db_and_table():
 
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    # Create index on hash if it doesn't exist
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_hash ON files (hash);')
+    conn.commit()
     return conn
 
 def close_db_connection(conn):
@@ -145,6 +150,8 @@ def rescan_duplicates():
     return duplicates
 
 def list_duplicates_excluding_original(output_file=None):
+    from pathlib import PurePath  # Import PurePath for OS-agnostic path handling
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -164,13 +171,37 @@ def list_duplicates_excluding_original(output_file=None):
         ''', (file_hash,))
         paths = [row[0] for row in cursor.fetchall()]
 
-        # Find the original file (with the shortest path)
-        original = min(paths, key=lambda x: len(x))
-        print(f"Original file for hash {file_hash}: {original}")
+        # Prepare a list to hold file info
+        file_info = []
+        for file_path in paths:
+            # Create a PurePath object
+            path_obj = PurePath(file_path)
+            # Get the parts of the path
+            path_parts = path_obj.parts
+            # Number of folders is total parts minus 1 (for the file name)
+            num_folders = len(path_parts) - 1
+            # Length of the entire path string
+            path_length = len(str(path_obj))
+            file_info.append({
+                'path': file_path,
+                'num_folders': num_folders,
+                'path_length': path_length
+            })
 
-        # Exclude the original from duplicates
-        duplicates = [p for p in paths if p != original]
+        # Find the minimum number of folders
+        min_num_folders = min(info['num_folders'] for info in file_info)
+        # Filter files that have the minimum number of folders
+        candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
+        # Among candidates, find the minimum path length
+        min_path_length = min(info['path_length'] for info in candidates)
+        # Filter candidates that have the minimum path length
+        original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
+        # Select the original file (here we pick the first one)
+        original_file = original_candidates[0]['path']
+        print(f"Original file for hash {file_hash}: {original_file}")
 
+        # Exclude the original file from duplicates
+        duplicates = [info['path'] for info in file_info if info['path'] != original_file]
         duplicates_excl_original.extend(duplicates)
 
     close_db_connection(conn)
@@ -191,6 +222,98 @@ def list_duplicates_excluding_original(output_file=None):
 
     return duplicates_excl_original
 
+def list_duplicates_csv(output_file):
+    import csv
+    from pathlib import PurePath  # For OS-agnostic path handling
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Get all hashes where there are duplicates
+    cursor.execute('''
+    SELECT hash FROM files
+    GROUP BY hash
+    HAVING COUNT(*) > 1
+    ''')
+    hashes = [row[0] for row in cursor.fetchall()]
+
+    duplicates_info = []
+
+    for file_hash in hashes:
+        cursor.execute('''
+        SELECT path FROM files WHERE hash = ?
+        ''', (file_hash,))
+        paths = [row[0] for row in cursor.fetchall()]
+
+        # Prepare a list to hold file info
+        file_info = []
+        for file_path in paths:
+            # Create a PurePath object
+            path_obj = PurePath(file_path)
+            # Get the parts of the path
+            path_parts = path_obj.parts
+            # Number of folders is total parts minus 1 (for the file name)
+            num_folders = len(path_parts) - 1
+            # Length of the entire path string
+            path_length = len(str(path_obj))
+            file_info.append({
+                'path': file_path,
+                'num_folders': num_folders,
+                'path_length': path_length,
+                'hash': file_hash
+            })
+
+        # Find the minimum number of folders
+        min_num_folders = min(info['num_folders'] for info in file_info)
+        # Filter files that have the minimum number of folders
+        candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
+        # Among candidates, find the minimum path length
+        min_path_length = min(info['path_length'] for info in candidates)
+        # Filter candidates that have the minimum path length
+        original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
+        # Select the original file (pick the first one)
+        original_file_info = original_candidates[0]
+        original_file = original_file_info['path']
+        print(f"Original file for hash {file_hash}: {original_file}")
+
+        # Tag each file as 'original' or 'duplicate' and collect info
+        for info in file_info:
+            if info['path'] == original_file:
+                duplicates_info.append({
+                    'status': 'original',
+                    'path': info['path'],
+                    'hash': info['hash']
+                })
+            else:
+                duplicates_info.append({
+                    'status': 'duplicate',
+                    'path': info['path'],
+                    'hash': info['hash']
+                })
+
+    close_db_connection(conn)
+
+    # Output the data to a CSV file
+    if output_file:
+        try:
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['status', 'path', 'hash']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+                writer.writeheader()
+                for info in duplicates_info:
+                    writer.writerow(info)
+            print(f"\nList of duplicates and originals has been written to {output_file}")
+        except Exception as e:
+            print(f"Error writing to file {output_file}: {e}", file=sys.stderr)
+    else:
+        # If no output file specified, print to console
+        print("\nList of duplicates and originals:")
+        for info in duplicates_info:
+            print(f"{info['status']}, {info['path']}, {info['hash']}")
+
+    return duplicates_info
+
 def main(directory):
     # Create database and table if they don't exist
     create_db_and_table()
@@ -208,7 +331,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process files and find duplicates.')
     
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
+
     # Subparser for the 'process' command
     parser_process = subparsers.add_parser('process', help='Process a directory to find duplicates')
     parser_process.add_argument('directory', help='Directory to process')
@@ -219,9 +342,13 @@ if __name__ == "__main__":
     # Subparser for the 'list-duplicates' command
     parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
     parser_list.add_argument('-o', '--output', help='Output file to write the list to')
-    
+
+    # Subparser for the 'list-duplicates-csv' command
+    parser_csv = subparsers.add_parser('list-duplicates-csv', help='List duplicates and originals in CSV format')
+    parser_csv.add_argument('-o', '--output', required=True, help='Output CSV file to write the list to')
+
     args = parser.parse_args()
-    
+
     if args.command == 'process':
         directory_to_process = args.directory
         if not os.path.isdir(directory_to_process):
@@ -232,5 +359,7 @@ if __name__ == "__main__":
         rescan_duplicates()
     elif args.command == 'list-duplicates':
         list_duplicates_excluding_original(output_file=args.output)
+    elif args.command == 'list-duplicates-csv':
+        list_duplicates_csv(output_file=args.output)
     else:
         parser.print_help()
