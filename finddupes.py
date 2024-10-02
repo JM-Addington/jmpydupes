@@ -23,6 +23,8 @@ def create_db_and_table():
             last_checked DATETIME
         )
         ''')
+        # Create index on hash
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_hash ON files (hash)')
         conn.commit()
 
 def get_db_connection():
