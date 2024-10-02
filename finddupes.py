@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import datetime
 import traceback
-import threading
+import argparse
 
 DB_NAME = 'file_data.db'
 
@@ -142,6 +142,53 @@ def rescan_duplicates():
     
     return duplicates
 
+def list_duplicates_excluding_original(output_file=None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Get all hashes where there are duplicates
+    cursor.execute('''
+    SELECT hash FROM files
+    GROUP BY hash
+    HAVING COUNT(*) > 1
+    ''')
+    hashes = [row[0] for row in cursor.fetchall()]
+
+    duplicates_excl_original = []
+
+    for file_hash in hashes:
+        cursor.execute('''
+        SELECT path FROM files WHERE hash = ?
+        ''', (file_hash,))
+        paths = [row[0] for row in cursor.fetchall()]
+
+        # Find the original file (with the shortest path)
+        original = min(paths, key=lambda x: len(x))
+        print(f"Original file for hash {file_hash}: {original}")
+
+        # Exclude the original from duplicates
+        duplicates = [p for p in paths if p != original]
+
+        duplicates_excl_original.extend(duplicates)
+
+    close_db_connection(conn)
+
+    # Output the list of duplicates excluding originals
+    if output_file:
+        try:
+            with open(output_file, 'w') as f:
+                for dup_file in duplicates_excl_original:
+                    f.write(f"{dup_file}\n")
+            print(f"\nList of duplicate files excluding originals has been written to {output_file}")
+        except Exception as e:
+            print(f"Error writing to file {output_file}: {e}", file=sys.stderr)
+    else:
+        print("\nList of duplicate files excluding originals:")
+        for dup_file in duplicates_excl_original:
+            print(dup_file)
+
+    return duplicates_excl_original
+
 def main(directory):
     # Create database and table if they don't exist
     create_db_and_table()
@@ -156,19 +203,32 @@ def main(directory):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Process files and find duplicates.')
     
-    # if flag --rescan-duplicates is passed, rescan duplicates. Do not process any directory
-    if len(sys.argv) == 2 and sys.argv[1] == "--rescan-duplicates":
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Subparser for the 'process' command
+    parser_process = subparsers.add_parser('process', help='Process a directory to find duplicates')
+    parser_process.add_argument('directory', help='Directory to process')
+    
+    # Subparser for the 'rescan-duplicates' command
+    parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
+    
+    # Subparser for the 'list-duplicates' command
+    parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
+    parser_list.add_argument('-o', '--output', help='Output file to write the list to')
+    
+    args = parser.parse_args()
+    
+    if args.command == 'process':
+        directory_to_process = args.directory
+        if not os.path.isdir(directory_to_process):
+            print(f"Error: {directory_to_process} is not a valid directory", file=sys.stderr)
+            sys.exit(1)
+        main(directory_to_process)
+    elif args.command == 'rescan-duplicates':
         rescan_duplicates()
-        sys.exit(0)
-    
-    if len(sys.argv) < 2:
-        print("Usage: python script.py <directory_to_process>")
-        sys.exit(1)
-    
-    directory_to_process = sys.argv[1]
-    if not os.path.isdir(directory_to_process):
-        print(f"Error: {directory_to_process} is not a valid directory", file=sys.stderr)
-        sys.exit(1)
-    
-    main(directory_to_process)
+    elif args.command == 'list-duplicates':
+        list_duplicates_excluding_original(output_file=args.output)
+    else:
+        parser.print_help()
