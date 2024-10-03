@@ -428,6 +428,44 @@ def delete_duplicates(preferred_source_directory=None, output_file=None,
         print("Note: Deletion was simulated. No files were actually deleted.")
     return
 
+def remove_missing_files():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT path FROM files')
+    rows = cursor.fetchall()
+    total_removed = 0
+
+    paths_to_remove = []
+
+    for row in rows:
+        file_path = row[0]
+        if not os.path.exists(file_path):
+            print(f"Marking {file_path} for removal from database as it no longer exists on disk.")
+            paths_to_remove.append((file_path,))
+
+    if paths_to_remove:
+        cursor.executemany('DELETE FROM files WHERE path = ?', paths_to_remove)
+        conn.commit()
+        total_removed = len(paths_to_remove)
+    else:
+        print("No missing files found in the database.")
+
+    close_db_connection(conn)
+    print(f"Total entries removed from database: {total_removed}")
+    
+
+def main(directory):
+    # Create database and table if they don't exist
+    create_db_and_table()
+    
+    # Get all files in the specified directory and subdirectories
+    files = walk_directory(directory)
+    
+    for file in files:
+        data = process_file(file)
+        if data is not None:
+            insert_data(data)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process files and find duplicates.')
 
@@ -439,6 +477,8 @@ if __name__ == "__main__":
 
     # Subparser for the 'rescan-duplicates' command
     parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
+    
+    parser_clean_db = subparsers.add_parser('clean-db', help='Remove entries from the database for files that no longer exist on disk')
 
     # Subparser for the 'list-duplicates' command
     parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
@@ -481,5 +521,7 @@ if __name__ == "__main__":
             append=args.append,
             simulate_delete=args.simulate_delete
         )
+    elif args.command == 'clean-db':
+        remove_missing_files()
     else:
         parser.print_help()
