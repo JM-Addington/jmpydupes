@@ -155,26 +155,35 @@ def rescan_duplicates():
 
     return duplicates
 
-def get_duplicates(preferred_source_directories=None):
+def get_duplicates(preferred_source_directories=None, within_directory=None):
     from pathlib import PurePath
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Get all hashes where there are duplicates
-    cursor.execute('''
-    SELECT hash FROM files
-    GROUP BY hash
-    HAVING COUNT(*) > 1
-    ''')
-    hashes = [row[0] for row in cursor.fetchall()]
+    # Get all files (or files within the specified directory)
+    if within_directory:
+        within_directory = os.path.abspath(within_directory)
+        # Select files within the specified directory
+        cursor.execute('''
+        SELECT hash, path FROM files WHERE path LIKE ?
+        ''', (f'{within_directory}%',))
+    else:
+        # Get all files
+        cursor.execute('''
+        SELECT hash, path FROM files
+        ''')
+    all_files = cursor.fetchall()
+
+    # Organize files by hash
+    files_by_hash = {}
+    for file_hash, file_path in all_files:
+        files_by_hash.setdefault(file_hash, []).append(file_path)
 
     duplicates_list = []
 
-    for file_hash in hashes:
-        cursor.execute('''
-        SELECT path FROM files WHERE hash = ?
-        ''', (file_hash,))
-        paths = [row[0] for row in cursor.fetchall()]
+    for file_hash, paths in files_by_hash.items():
+        if len(paths) < 2:
+            continue  # Not a duplicate group
 
         # Prepare a list to hold file info
         file_info = []
@@ -201,30 +210,32 @@ def get_duplicates(preferred_source_directories=None):
                 'preference_level': preference_level  # None if not in preferred directories
             })
 
+        # If within_directory is specified, filter out files outside of it
+        if within_directory:
+            file_info = [info for info in file_info if info['path'].startswith(within_directory)]
+
+            # If less than 2 files remain after filtering, no duplicates to process
+            if len(file_info) < 2:
+                continue
+
         original_file_info = None
         no_matching_original = False
 
         if preferred_source_directories:
-            # Filter files that are under any of the preferred source directories
+            # Same selection logic as before
             preferred_files = [info for info in file_info if info['preference_level'] is not None]
             if preferred_files:
-                # Find the files with the highest preference (lowest index)
                 min_preference = min(info['preference_level'] for info in preferred_files)
                 highest_pref_files = [info for info in preferred_files if info['preference_level'] == min_preference]
-                # From these files, select the one with least number of folders
                 min_num_folders = min(info['num_folders'] for info in highest_pref_files)
                 candidates = [info for info in highest_pref_files if info['num_folders'] == min_num_folders]
-                # From candidates, select the one with shortest path length
                 min_path_length = min(info['path_length'] for info in candidates)
                 original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
                 original_file_info = original_candidates[0]
             else:
-                # No files match the preferred source directories
                 no_matching_original = True
-                # Proceed with the default method
                 original_file_info = select_default_original(file_info)
         else:
-            # Proceed with the default method
             original_file_info = select_default_original(file_info)
 
         # Collect the duplicates excluding the original
@@ -249,7 +260,7 @@ def select_default_original(file_info):
     return original_candidates[0]
 
 def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None):
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_excl_original = []
 
     for group in duplicates_list:
@@ -281,7 +292,7 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
 
 def list_duplicates_csv(output_file, preferred_source_directories=None):
     import csv
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_info = []
 
     for group in duplicates_list:
@@ -336,7 +347,7 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
     import os
     import csv
 
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
 
     total_deleted = 0
 
@@ -513,11 +524,13 @@ if __name__ == "__main__":
     parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
     parser_list.add_argument('-o', '--output', help='Output file to write the list to')
     parser_list.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
+    parser_list.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     # Subparser for the 'list-duplicates-csv' command
     parser_csv = subparsers.add_parser('list-duplicates-csv', help='List duplicates and originals in CSV format')
     parser_csv.add_argument('-o', '--output', required=True, help='Output CSV file to write the list to')
     parser_csv.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
+    parser_csv.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     # Subparser for the 'delete-duplicates' command
     parser_delete = subparsers.add_parser('delete-duplicates', help='Delete duplicate files')
@@ -527,13 +540,18 @@ if __name__ == "__main__":
     group.add_argument('--overwrite', action='store_true', help='Overwrite the output file if it exists')
     group.add_argument('--append', action='store_true', help='Append to the output file if it exists')
     parser_delete.add_argument('--simulate-delete', action='store_true', help='Simulate deletion without actually deleting files')
+    parser_delete.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     args = parser.parse_args()
 
+    # Handling preferred directories
     if args.prefer_directory:
         preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
     else:
         preferred_directories = None
+
+    # Handling within-directory
+    within_directory = args.within_directory
 
     if args.command == 'process':
         directory_to_process = args.directory
@@ -545,16 +563,17 @@ if __name__ == "__main__":
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
     elif args.command == 'list-duplicates':
-        list_duplicates_excluding_original(output_file=args.output, preferred_source_directories=preferred_directories)
+        list_duplicates_excluding_original(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
     elif args.command == 'list-duplicates-csv':
-        list_duplicates_csv(output_file=args.output, preferred_source_directories=preferred_directories)
+        list_duplicates_csv(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
     elif args.command == 'delete-duplicates':
         delete_duplicates(
             preferred_source_directories=preferred_directories,
             output_file=args.output,
             overwrite=args.overwrite,
             append=args.append,
-            simulate_delete=args.simulate_delete
+            simulate_delete=args.simulate_delete,
+            within_directory=within_directory
         )
     elif args.command == 'clean-db':
         remove_missing_files()
