@@ -155,7 +155,7 @@ def rescan_duplicates():
 
     return duplicates
 
-def get_duplicates(preferred_source_directory=None):
+def get_duplicates(preferred_source_directories=None):
     from pathlib import PurePath
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -187,12 +187,13 @@ def get_duplicates(preferred_source_directory=None):
             num_folders = len(path_parts) - 1
             # Length of the entire path string
             path_length = len(str(path_obj))
-            # Determine if the path matches the preferred source directory
-            if preferred_source_directory:
-                # Use PurePath for comparison
-                preferred_path = PurePath(preferred_source_directory)
-                # Check if file_path is under preferred_source_directory
-                is_in_preferred = preferred_path in path_obj.parents or preferred_path == path_obj.parent
+            # Determine if the path matches any of the preferred source directories
+            if preferred_source_directories:
+                is_in_preferred = any(
+                    PurePath(preferred_dir) in path_obj.parents or
+                    PurePath(preferred_dir) == path_obj.parent
+                    for preferred_dir in preferred_source_directories
+                )
             else:
                 is_in_preferred = False
             file_info.append({
@@ -206,8 +207,8 @@ def get_duplicates(preferred_source_directory=None):
         original_file_info = None
         no_matching_original = False
 
-        if preferred_source_directory:
-            # Filter files that are under the preferred source directory
+        if preferred_source_directories:
+            # Filter files that are under any of the preferred source directories
             preferred_files = [info for info in file_info if info['is_in_preferred']]
             if preferred_files:
                 # From preferred files, select the one with least number of folders, then shortest path length
@@ -217,7 +218,7 @@ def get_duplicates(preferred_source_directory=None):
                 original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
                 original_file_info = original_candidates[0]
             else:
-                # No files match the preferred source directory
+                # No files match the preferred source directories
                 no_matching_original = True
                 # Proceed with the default method
                 min_num_folders = min(info['num_folders'] for info in file_info)
@@ -246,8 +247,8 @@ def get_duplicates(preferred_source_directory=None):
     close_db_connection(conn)
     return duplicates_list
 
-def list_duplicates_excluding_original(output_file=None, preferred_source_directory=None):
-    duplicates_list = get_duplicates(preferred_source_directory=preferred_source_directory)
+def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None):
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
     duplicates_excl_original = []
 
     for group in duplicates_list:
@@ -255,7 +256,7 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
         duplicates = [info['path'] for info in group['duplicates']]
 
         if group['no_matching_original']:
-            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directory.")
+            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
         else:
             print(f"Original file for hash {group['hash']}: {original_file}")
 
@@ -277,9 +278,9 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
 
     return duplicates_excl_original
 
-def list_duplicates_csv(output_file, preferred_source_directory=None):
+def list_duplicates_csv(output_file, preferred_source_directories=None):
     import csv
-    duplicates_list = get_duplicates(preferred_source_directory=preferred_source_directory)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
     duplicates_info = []
 
     for group in duplicates_list:
@@ -288,7 +289,7 @@ def list_duplicates_csv(output_file, preferred_source_directory=None):
 
         if group['no_matching_original']:
             status_flag = 'duplicate - no matching original path'
-            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directory.")
+            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
         else:
             status_flag = 'original'
             print(f"Original file for hash {group['hash']}: {original_file_info['path']}")
@@ -329,12 +330,12 @@ def list_duplicates_csv(output_file, preferred_source_directory=None):
 
     return duplicates_info
 
-def delete_duplicates(preferred_source_directory=None, output_file=None,
+def delete_duplicates(preferred_source_directories=None, output_file=None,
                       overwrite=False, append=False, simulate_delete=False):
     import os
     import csv
 
-    duplicates_list = get_duplicates(preferred_source_directory=preferred_source_directory)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)
 
     total_deleted = 0
 
@@ -375,7 +376,7 @@ def delete_duplicates(preferred_source_directory=None, output_file=None,
             original_path = original_file_info['path']
             if group['no_matching_original']:
                 status_flag = 'kept - no matching original'
-                print(f"Duplicate group with hash {group['hash']} has no matching original in specified directory.")
+                print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
             else:
                 status_flag = 'kept'
                 print(f"Original file for hash {group['hash']}: {original_path}")
@@ -504,22 +505,22 @@ if __name__ == "__main__":
 
     # Subparser for the 'rescan-duplicates' command
     parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
-    
+
     parser_clean_db = subparsers.add_parser('clean-db', help='Remove entries from the database for files that no longer exist on disk')
 
     # Subparser for the 'list-duplicates' command
     parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
     parser_list.add_argument('-o', '--output', help='Output file to write the list to')
-    parser_list.add_argument('--prefer-directory', help='Preferred source directory for selecting original files')
+    parser_list.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
 
     # Subparser for the 'list-duplicates-csv' command
     parser_csv = subparsers.add_parser('list-duplicates-csv', help='List duplicates and originals in CSV format')
     parser_csv.add_argument('-o', '--output', required=True, help='Output CSV file to write the list to')
-    parser_csv.add_argument('--prefer-directory', help='Preferred source directory for selecting original files')
+    parser_csv.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
 
     # Subparser for the 'delete-duplicates' command
     parser_delete = subparsers.add_parser('delete-duplicates', help='Delete duplicate files')
-    parser_delete.add_argument('--prefer-directory', help='Preferred source directory for selecting original files')
+    parser_delete.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
     parser_delete.add_argument('-o', '--output', help='Output CSV file to log the deleted files')
     group = parser_delete.add_mutually_exclusive_group()
     group.add_argument('--overwrite', action='store_true', help='Overwrite the output file if it exists')
@@ -527,6 +528,11 @@ if __name__ == "__main__":
     parser_delete.add_argument('--simulate-delete', action='store_true', help='Simulate deletion without actually deleting files')
 
     args = parser.parse_args()
+
+    if args.prefer_directory:
+        preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
+    else:
+        preferred_directories = None
 
     if args.command == 'process':
         directory_to_process = args.directory
@@ -538,12 +544,12 @@ if __name__ == "__main__":
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
     elif args.command == 'list-duplicates':
-        list_duplicates_excluding_original(output_file=args.output, preferred_source_directory=args.prefer_directory)
+        list_duplicates_excluding_original(output_file=args.output, preferred_source_directories=preferred_directories)
     elif args.command == 'list-duplicates-csv':
-        list_duplicates_csv(output_file=args.output, preferred_source_directory=args.prefer_directory)
+        list_duplicates_csv(output_file=args.output, preferred_source_directories=preferred_directories)
     elif args.command == 'delete-duplicates':
         delete_duplicates(
-            preferred_source_directory=args.prefer_directory,
+            preferred_source_directories=preferred_directories,
             output_file=args.output,
             overwrite=args.overwrite,
             append=args.append,
