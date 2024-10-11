@@ -40,20 +40,32 @@ def close_db_connection(conn):
         conn.close()
 
 def process_file(file_path):
-    if not os.path.exists(file_path):
+    # Ensure file_path is a Path object and get the absolute path
+    if not isinstance(file_path, Path):
+        file_path = Path(file_path)
+    file_path = file_path.absolute()
+
+    # Check if the file exists using os.lstat
+    try:
+        os.lstat(file_path)
+    except FileNotFoundError:
         print(f"PyDupes: {file_path} no longer exists, removing from database")
+        # Remove from database
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-        DELETE FROM files WHERE path = ?
-        ''', (file_path,))
-        conn.commit()
-        close_db_connection(conn)
+        try:
+            cursor.execute('DELETE FROM files WHERE path = ?', (str(file_path),))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error while deleting {file_path}: {e}")
+        finally:
+            close_db_connection(conn)
+        return None
+    except Exception as e:
+        print(f"Error accessing file {file_path}: {e}")
         return None
 
-    file_path = Path(file_path).resolve()  # Get the full path
     print(f"PyDupes: Processing {file_path}")
-
     try:
         # Get file size and last modified time
         stat = file_path.stat()
@@ -63,17 +75,14 @@ def process_file(file_path):
         # Calculate MD5 hash
         with open(file_path, "rb") as f:
             file_hash = hashlib.md5()
-            chunk = f.read(8192)
-            while chunk:
+            while chunk := f.read(8192):
                 file_hash.update(chunk)
-                chunk = f.read(8192)
 
         return file_hash.hexdigest(), str(file_path), size, last_modified
     except Exception as e:
-        print(f"Error processing {file_path}: {str(e)}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-
-    return None  # Return None if there was an error
+        print(f"Error processing {file_path}: {str(e)}")
+        traceback.print_exc()
+        return None  # Return None if there was an error
 
 def insert_data(data):
     now = datetime.datetime.now()
@@ -454,15 +463,32 @@ def remove_missing_files():
     print(f"Total entries removed from database: {total_removed}")
     
 
-def main(directory):
+def main(directory, skip_existing=False):
     # Create database and table if they don't exist
     create_db_and_table()
-    
+
     # Get all files in the specified directory and subdirectories
     files = walk_directory(directory)
-    
+
+    existing_paths = set()
+    if skip_existing:
+        print("Loading existing file paths from database...")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT path FROM files')
+        rows = cursor.fetchall()
+        existing_paths = {row[0] for row in rows}
+        print(f"Loaded {len(existing_paths)} existing file paths.")
+        close_db_connection(conn)
+
     for file in files:
-        data = process_file(file)
+        file_path = Path(file).resolve()
+
+        if skip_existing and str(file_path) in existing_paths:
+            print(f"PyDupes: Skipping {file_path} (already in database)")
+            continue
+
+        data = process_file(file_path)
         if data is not None:
             insert_data(data)
 
@@ -474,6 +500,7 @@ if __name__ == "__main__":
     # Subparser for the 'process' command
     parser_process = subparsers.add_parser('process', help='Process a directory to find duplicates')
     parser_process.add_argument('directory', help='Directory to process')
+    parser_process.add_argument('--skip-existing', action='store_true', help='Skip processing files that are already in the database')
 
     # Subparser for the 'rescan-duplicates' command
     parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
@@ -506,7 +533,8 @@ if __name__ == "__main__":
         if not os.path.isdir(directory_to_process):
             print(f"Error: {directory_to_process} is not a valid directory", file=sys.stderr)
             sys.exit(1)
-        main(directory_to_process)
+        skip_existing = args.skip_existing
+        main(directory_to_process, skip_existing=skip_existing)
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
     elif args.command == 'list-duplicates':
