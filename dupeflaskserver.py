@@ -8,6 +8,7 @@ from fnmatch import fnmatch
 app = Flask(__name__)
 
 DATABASE = 'file_data.db'
+MAX_FILES_RETURNED = 1000
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -26,6 +27,25 @@ def query_db(query, args=(), one=False):
     rv = cur.fetchall()
     cur.close()
     return (rv[0] if rv else None) if one else rv
+
+SIZE_THRESHOLDS_ORDERED = ["1mb", "10mb", "100mb", "1tb"]
+
+SIZE_THRESHOLDS = {
+    '1mb': 1 * 1024 * 1024,
+    '10mb': 10 * 1024 * 1024,
+    '100mb': 100 * 1024 * 1024,
+    '1tb': 1 * 1024 * 1024 * 1024 * 1024
+}
+
+def apply_size_filter(files, size_filter):
+    if not size_filter:
+        return files
+    
+    threshold = SIZE_THRESHOLDS.get(size_filter)
+    if not threshold:
+        return files
+    
+    return [file for file in files if file[3] >= threshold]
 
 def apply_filters(files, exclude_hidden, exclude_small, exclude_patterns):
     filtered_files = []
@@ -106,32 +126,37 @@ def show_duplicates():
     exclude_hidden = request.args.get('exclude_hidden', 'true') == 'true'
     exclude_small = request.args.get('exclude_small', 'true') == 'true'
     exclude_patterns = request.args.get('exclude_patterns', '')
+    size_filter = request.args.get('size_filter', '')
     sort_by = request.args.get('sort_by', 'hash')
     direction = request.args.get('direction', 'asc')
 
     sort_column, order = get_sort_column_and_order(sort_by, direction)
 
-    files = query_db(f'''
+    query = f'''
     SELECT * FROM files
     WHERE hash IN 
     (SELECT hash FROM files GROUP BY hash HAVING COUNT(*) > 1)
     ORDER BY {sort_column} {order}, hash, path
-    ''')
+    LIMIT {MAX_FILES_RETURNED}
+    '''
 
+    files = query_db(query)
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
+    files = apply_size_filter(files, size_filter)
     stats = calculate_statistics(files)
     
     sort_urls = generate_sort_urls("/", sort_by, direction)
 
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        return render_template('partials/file_list.html', files=files)
+        return render_template('file_list.html', files=files)
 
     return render_template('files.html', files=files, stats=stats, title="Duplicate Files", search_route="/",
                            exclude_hidden=exclude_hidden, exclude_small=exclude_small, exclude_patterns=exclude_patterns,
-                           sort_by=sort_by, direction=direction, sort_urls=sort_urls)
+                           sort_by=sort_by, direction=direction, sort_urls=sort_urls, selected_size_filter=size_filter)
+    
 
 @app.route('/search', methods=['GET'])
-def search_files():
+def search_files():   
     search_query = request.args.get('search', '').strip()
     exclude_hidden = request.args.get('exclude_hidden', 'true') == 'true'
     exclude_small = request.args.get('exclude_small', 'true') == 'true'
@@ -141,29 +166,61 @@ def search_files():
 
     sort_column, order = get_sort_column_and_order(sort_by, direction)
 
-    if search_query:
-        files = query_db(f'''
-        SELECT * FROM files
-        WHERE (hash LIKE ? OR path LIKE ?)
-        ORDER BY {sort_column} {order}, hash, path
-        ''', (f'%{search_query}%', f'%{search_query}%'))
-    else:
-        files = query_db(f'''
-        SELECT * FROM files
-        ORDER BY {sort_column} {order}, hash, path
-        ''')
-
+    # Modified query to include only duplicate files
+    initial_query = '''
+    SELECT * FROM files
+    WHERE hash IN 
+        (SELECT hash FROM files GROUP BY hash HAVING COUNT(*) > 1)
+    AND (hash LIKE ? OR path LIKE ?)
+    ORDER BY {sort_column} {order}, hash, path
+    '''.format(sort_column=sort_column, order=order)
+    
+    files = query_db(initial_query, (f'%{search_query}%', f'%{search_query}%'))
+    
+    # Apply initial non-size filters
     files = apply_filters(files, exclude_hidden, exclude_small, exclude_patterns)
+    
+    # Automatically apply size filters if necessary
+    applied_size_filter = ''
+    for size_filter in ["1mb", "10mb", "100mb", "1tb"]:
+        if len(files) <= MAX_FILES_RETURNED:
+            break
+        applied_size_filter = size_filter
+        files = apply_size_filter(files, size_filter)
+
+    # Ensure result is not more than MAX_FILES_RETURNED
+    if len(files) > MAX_FILES_RETURNED:
+        files = files[:MAX_FILES_RETURNED]
+    
     stats = calculate_statistics(files)
     
     sort_urls = generate_sort_urls("/search", sort_by, direction)
 
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        return render_template('partials/file_list.html', files=files)
+        return render_template('templates/file_list.html', files=files)
 
     return render_template('files.html', files=files, stats=stats, title="Search Files", search_route="/search",
                            search_query=search_query, exclude_hidden=exclude_hidden, exclude_small=exclude_small,
-                           exclude_patterns=exclude_patterns, sort_by=sort_by, direction=direction, sort_urls=sort_urls)
+                           exclude_patterns=exclude_patterns, sort_by=sort_by, direction=direction,
+                           sort_urls=sort_urls, selected_size_filter=applied_size_filter)
+    
+@app.route('/open_in_finder', methods=['POST'])
+def open_in_finder():
+    if sys.platform != "darwin":  # Check if the system is macOS
+        return jsonify({'message': "Open in Finder is only supported on macOS."}), 400
+
+    data = request.get_json()
+    file_path = data.get('path')
+
+    if not file_path:
+        return jsonify({'message': "Invalid file path."}), 400
+
+    # Use the 'open' command on macOS to open Finder at the file's location
+    try:
+        os.system(f"open -R '{file_path}'")
+        return jsonify({'message': "Opened in Finder successfully."})
+    except Exception as e:
+        return jsonify({'message': f"Error opening Finder: {str(e)}"}), 500
 
 @app.route('/download', methods=['GET'])
 def download_csv():

@@ -1,6 +1,9 @@
 <tbody>
     {% for file in files %}
     <tr>
+        <td>
+            <button onclick="openInFinder('{{ file[2] }}')">Open</button>
+        </td>
         <td>{{ file[1] }}</td>
         <td>{{ file[2] }}</td>
         <td>{{ file[3] | sizeof_fmt }}</td>

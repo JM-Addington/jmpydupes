@@ -181,27 +181,24 @@ def get_duplicates(preferred_source_directories=None):
         for file_path in paths:
             # Create a PurePath object
             path_obj = PurePath(file_path)
-            # Get the parts of the path
-            path_parts = path_obj.parts
             # Number of folders is total parts minus 1 (for the file name)
-            num_folders = len(path_parts) - 1
+            num_folders = len(path_obj.parts) - 1
             # Length of the entire path string
             path_length = len(str(path_obj))
-            # Determine if the path matches any of the preferred source directories
+            # Determine the preference level based on preferred directories
+            preference_level = None
             if preferred_source_directories:
-                is_in_preferred = any(
-                    PurePath(preferred_dir) in path_obj.parents or
-                    PurePath(preferred_dir) == path_obj.parent
-                    for preferred_dir in preferred_source_directories
-                )
-            else:
-                is_in_preferred = False
+                for index, preferred_dir in enumerate(preferred_source_directories):
+                    preferred_path = PurePath(preferred_dir)
+                    if preferred_path in path_obj.parents or preferred_path == path_obj.parent:
+                        preference_level = index  # Lower index means higher preference
+                        break  # Stop at the first match
             file_info.append({
                 'path': file_path,
                 'num_folders': num_folders,
                 'path_length': path_length,
                 'hash': file_hash,
-                'is_in_preferred': is_in_preferred
+                'preference_level': preference_level  # None if not in preferred directories
             })
 
         original_file_info = None
@@ -209,11 +206,15 @@ def get_duplicates(preferred_source_directories=None):
 
         if preferred_source_directories:
             # Filter files that are under any of the preferred source directories
-            preferred_files = [info for info in file_info if info['is_in_preferred']]
+            preferred_files = [info for info in file_info if info['preference_level'] is not None]
             if preferred_files:
-                # From preferred files, select the one with least number of folders, then shortest path length
-                min_num_folders = min(info['num_folders'] for info in preferred_files)
-                candidates = [info for info in preferred_files if info['num_folders'] == min_num_folders]
+                # Find the files with the highest preference (lowest index)
+                min_preference = min(info['preference_level'] for info in preferred_files)
+                highest_pref_files = [info for info in preferred_files if info['preference_level'] == min_preference]
+                # From these files, select the one with least number of folders
+                min_num_folders = min(info['num_folders'] for info in highest_pref_files)
+                candidates = [info for info in highest_pref_files if info['num_folders'] == min_num_folders]
+                # From candidates, select the one with shortest path length
                 min_path_length = min(info['path_length'] for info in candidates)
                 original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
                 original_file_info = original_candidates[0]
@@ -221,18 +222,10 @@ def get_duplicates(preferred_source_directories=None):
                 # No files match the preferred source directories
                 no_matching_original = True
                 # Proceed with the default method
-                min_num_folders = min(info['num_folders'] for info in file_info)
-                candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
-                min_path_length = min(info['path_length'] for info in candidates)
-                original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
-                original_file_info = original_candidates[0]
+                original_file_info = select_default_original(file_info)
         else:
             # Proceed with the default method
-            min_num_folders = min(info['num_folders'] for info in file_info)
-            candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
-            min_path_length = min(info['path_length'] for info in candidates)
-            original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
-            original_file_info = original_candidates[0]
+            original_file_info = select_default_original(file_info)
 
         # Collect the duplicates excluding the original
         duplicates = [info for info in file_info if info['path'] != original_file_info['path']]
@@ -246,6 +239,14 @@ def get_duplicates(preferred_source_directories=None):
 
     close_db_connection(conn)
     return duplicates_list
+
+def select_default_original(file_info):
+    # Default selection: least number of folders, then shortest path length
+    min_num_folders = min(info['num_folders'] for info in file_info)
+    candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
+    min_path_length = min(info['path_length'] for info in candidates)
+    original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
+    return original_candidates[0]
 
 def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None):
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories)

@@ -59,6 +59,18 @@
                     });
                 });
             });
+
+            function openInFinder(filePath) {
+                $.ajax({
+                    url: '/open_in_finder',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ path: filePath }),
+                    success: function(data) {
+                        alert(data.message);
+                    }
+                });
+            }
         </script>
     </head>
 
@@ -71,7 +83,15 @@
         <label><input type="checkbox" name="exclude_hidden" value="true" checked> Exclude hidden directories</label>
         <label><input type="checkbox" name="exclude_small" value="true" checked> Exclude files < 10kb</label>
         <br>
-        <input type="text" name="exclude_patterns" value="{{ exclude_patterns }}" placeholder="Exclude patterns (e.g., *.js,*.txt)">
+        <!-- Dropdown for size filter -->
+        <label for="size_filter">Minimum File Size:</label>
+        <select name="size_filter" id="size_filter">
+            <option value="">No size filter</option>
+            <option value="1mb" {% if selected_size_filter == '1mb' %}selected{% endif %}>1 MB</option>
+            <option value="10mb" {% if selected_size_filter == '10mb' %}selected{% endif %}>10 MB</option>
+            <option value="100mb" {% if selected_size_filter == '100mb' %}selected{% endif %}>100 MB</option>
+            <option value="1tb" {% if selected_size_filter == '1tb' %}selected{% endif %}>1 TB</option>
+        </select>
         <br>
         <button type="submit">Apply Filters</button>
     </form>
