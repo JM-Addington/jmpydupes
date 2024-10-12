@@ -2,7 +2,6 @@ import os
 import sys
 import argparse
 import datetime
-import hashlib
 import sqlite3
 import traceback
 import csv
@@ -145,7 +144,6 @@ def rescan_duplicates():
     return duplicates
 
 def get_duplicates(preferred_source_directories=None, within_directory=None):
-    from pathlib import PurePath
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -280,7 +278,6 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
     return duplicates_excl_original
 
 def list_duplicates_csv(output_file, preferred_source_directories=None):
-    import csv
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_info = []
 
@@ -333,9 +330,6 @@ def list_duplicates_csv(output_file, preferred_source_directories=None):
 
 def delete_duplicates(preferred_source_directories=None, output_file=None,
                       overwrite=False, append=False, simulate_delete=False, within_directory=None):
-    import os
-    import csv
-    from pathlib import Path
 
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     total_deleted = 0
