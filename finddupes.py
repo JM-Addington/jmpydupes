@@ -6,18 +6,22 @@ import sqlite3
 import traceback
 import logging
 import xxhash
-from pathlib import Path
+from pathlib import Path, PurePath
 from queue import Queue
 from threading import Thread, Lock
 from tqdm import tqdm
-from time import sleep
 
 DB_NAME = 'file_data.db'
 
 # Global list for processed data; shared between threads
 processed_data = []
 
+# Database Functions
 def create_db_and_table():
+    """
+    Create the SQLite database and the files table if they don't exist.
+    Also creates an index on the hash column for faster queries.
+    """
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -35,6 +39,13 @@ def create_db_and_table():
         conn.commit()
 
 def get_db_connection():
+    """
+    Get a connection to the SQLite database.
+    Also ensures that the index on the hash column exists.
+    
+    Returns:
+        sqlite3.Connection: An open connection to the database.
+    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     # Create index on hash if it doesn't exist
@@ -43,20 +54,33 @@ def get_db_connection():
     return conn
 
 def close_db_connection(conn):
+    """
+    Close the given database connection if it's open.
+    
+    Args:
+        conn (sqlite3.Connection): The database connection to close.
+    """
     if conn:
         conn.close()
 
+# File Processing Functions
 def process_file(file_path):
+    """
+    Process a single file: calculate its hash and collect metadata.
+    
+    Args:
+        file_path (str or Path): The path to the file to process.
+    
+    Returns:
+        tuple: A tuple containing (file_hash, file_path, size, last_modified), or None if an error occurred.
+    """
     # Ensure file_path is a Path object and get the absolute path
     if not isinstance(file_path, Path):
         file_path = Path(file_path)
     file_path = file_path.absolute()
 
-    # Check if the file exists using os.lstat
-    try:
-        os.lstat(file_path)
-    except FileNotFoundError:
-        # Handle missing file
+    # Check if the file exists
+    if not file_path.exists():
         return None
 
     print(f"PyDupes: Processing {file_path}")
@@ -80,6 +104,17 @@ def process_file(file_path):
         return None  # Return None if there was an error
 
 def worker_thread(file_queue, worker_pbar, overall_pbar, lock, thread_id):
+    """
+    Worker thread function for processing files.
+    Each thread processes files from the file_queue and updates progress bars.
+
+    Args:
+        file_queue (Queue): A queue containing file paths to process.
+        worker_pbar (tqdm): A progress bar for this worker thread.
+        overall_pbar (tqdm): The overall progress bar.
+        lock (Lock): A threading lock for synchronizing access to shared resources.
+        thread_id (int): The ID of the thread.
+    """
     while not file_queue.empty():
         try:
             file_path = file_queue.get_nowait()
@@ -133,10 +168,15 @@ def worker_thread(file_queue, worker_pbar, overall_pbar, lock, thread_id):
         worker_pbar.close()
 
 def insert_data(data):
+    """
+    Insert or update a single file record in the database.
+
+    Args:
+        data (tuple): A tuple containing (file_hash, file_path, size, last_modified).
+    """
     now = datetime.datetime.now()
     conn = get_db_connection()
     try:
-        # If this file already exists in the database, update the last_checked time
         cursor = conn.cursor()
         cursor.execute('''
         SELECT id FROM files WHERE path = ?
@@ -151,15 +191,14 @@ def insert_data(data):
             ''', (data[0], data[2], data[3], now, existing_file[0]))
             conn.commit()
 
-            print (f"PyDupes: Updated {data[1]}")
+            print(f"PyDupes: Updated {data[1]}")
             return
 
-        with conn:  # This automatically handles commit/rollback
-            cursor = conn.cursor()
-            cursor.execute('''
-            INSERT OR REPLACE INTO files (hash, path, size, last_modified, last_checked)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (*data, now))
+        cursor.execute('''
+        INSERT INTO files (hash, path, size, last_modified, last_checked)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (*data, now))
+        conn.commit()
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)
     except Exception as e:
@@ -169,6 +208,12 @@ def insert_data(data):
         close_db_connection(conn)
 
 def insert_data_batch(data_list):
+    """
+    Perform a bulk insert or update of file records in the database.
+
+    Args:
+        data_list (list): A list of tuples, each containing (file_hash, file_path, size, last_modified).
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -184,11 +229,20 @@ def insert_data_batch(data_list):
         print(f"Database error during batch insert: {e}", file=sys.stderr)
     except Exception as e:
         print(f"Error during batch insert: {e}", file=sys.stderr)
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
     finally:
         close_db_connection(conn)
 
 def walk_directory(directory):
+    """
+    Generator function to walk through a directory and yield file paths.
+
+    Args:
+        directory (str): The directory to scan.
+
+    Yields:
+        str: The full path to each file found.
+    """
     for root, dirs, files in os.walk(directory, topdown=True, onerror=None, followlinks=False):
         for name in files:
             try:
@@ -200,6 +254,12 @@ def walk_directory(directory):
         dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
 
 def load_existing_paths():
+    """
+    Load existing file paths from the database into a set for quick lookup.
+
+    Returns:
+        set: A set of file paths currently stored in the database.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT path FROM files')
@@ -208,8 +268,14 @@ def load_existing_paths():
     existing_paths = set(row[0] for row in rows)
     return existing_paths
 
-# Rescan duplicates
+# Duplicate Handling Functions
 def rescan_duplicates():
+    """
+    Rescan duplicate files to update their hashes and metadata in the database.
+
+    Returns:
+        list: A list of tuples containing (hash, path) of duplicate files.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -224,7 +290,7 @@ def rescan_duplicates():
     duplicates = cursor.fetchall()
     close_db_connection(conn)
 
-    # Rescan each duplicate file, no thread pool
+    # Rescan each duplicate file
     for duplicate in duplicates:
         data = process_file(duplicate[1])
         if data is not None:
@@ -233,13 +299,22 @@ def rescan_duplicates():
     return duplicates
 
 def get_duplicates(preferred_source_directories=None, within_directory=None):
+    """
+    Retrieve a list of duplicate files, optionally filtered by directory preferences and location.
+
+    Args:
+        preferred_source_directories (list): A list of directories that have higher preference for original files.
+        within_directory (str): Only examine duplicates within this directory.
+
+    Returns:
+        list: A list of dictionaries, each representing a group of duplicates.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
 
     # Get all files (or files within the specified directory)
     if within_directory:
-        within_directory = os.path.abspath(within_directory)
-        # Select files within the specified directory
+        within_directory = os.path.normpath(os.path.abspath(within_directory))
         cursor.execute('''
         SELECT hash, path FROM files WHERE path LIKE ?
         ''', (f'{within_directory}%',))
@@ -259,11 +334,15 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
 
     for file_hash, paths in files_by_hash.items():
         if len(paths) < 2:
-            continue  # Not a duplicate group
+            continue  # Not enough files for duplicates
 
         # Prepare a list to hold file info
         file_info = []
         for file_path in paths:
+            file_path_normalized = os.path.normpath(file_path)
+            # Skip files not within the specified directory
+            if within_directory and not file_path_normalized.startswith(within_directory):
+                continue
             # Create a PurePath object
             path_obj = PurePath(file_path)
             # Number of folders is total parts minus 1 (for the file name)
@@ -286,13 +365,8 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
                 'preference_level': preference_level  # None if not in preferred directories
             })
 
-        # If within_directory is specified, filter out files outside of it
-        if within_directory:
-            file_info = [info for info in file_info if info['path'].startswith(within_directory)]
-
-            # If less than 2 files remain after filtering, no duplicates to process
-            if len(file_info) < 2:
-                continue
+        if len(file_info) < 2:
+            continue  # Not enough files after filtering
 
         original_file_info = None
         no_matching_original = False
@@ -328,6 +402,15 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
     return duplicates_list
 
 def select_default_original(file_info):
+    """
+    Select the default original file from a list of file info dictionaries.
+
+    Args:
+        file_info (list): A list of dictionaries containing file information.
+
+    Returns:
+        dict: A dictionary containing information about the selected original file.
+    """
     # Default selection: least number of folders, then shortest path length
     min_num_folders = min(info['num_folders'] for info in file_info)
     candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
@@ -336,7 +419,18 @@ def select_default_original(file_info):
     return original_candidates[0]
 
 def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None, within_directory=None):
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
+    """
+    List duplicates excluding the original file.
+
+    Args:
+        output_file (str): Path to the output file where the list will be written. If None, prints to console.
+        preferred_source_directories (list): List of directories with preference for selecting originals.
+        within_directory (str): Only examine duplicates within this directory.
+
+    Returns:
+        list: A list of duplicate file paths excluding the original files.
+    """
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_directories, within_directory=within_directory)
     duplicates_excl_original = []
 
     for group in duplicates_list:
@@ -367,6 +461,17 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
     return duplicates_excl_original
 
 def list_duplicates_csv(output_file, preferred_source_directories=None, within_directory=None):
+    """
+    List duplicates and originals in CSV format.
+
+    Args:
+        output_file (str): Path to the output CSV file.
+        preferred_source_directories (list): List of directories with preference for selecting originals.
+        within_directory (str): Only examine duplicates within this directory.
+
+    Returns:
+        list: A list of dictionaries containing duplicates and original file information.
+    """
     import csv
 
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
@@ -399,29 +504,33 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
             })
 
     # Output the data to a CSV file
-    if output_file:
-        try:
-            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['status', 'path', 'hash']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    try:
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['status', 'path', 'hash']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
-                writer.writeheader()
-                for info in duplicates_info:
-                    writer.writerow(info)
-            print(f"\nList of duplicates and originals has been written to {output_file}")
-        except Exception as e:
-            print(f"Error writing to file {output_file}: {e}", file=sys.stderr)
-    else:
-        # If no output file specified, print to console
-        print("\nList of duplicates and originals:")
-        for info in duplicates_info:
-            print(f"{info['status']}, {info['path']}, {info['hash']}")
+            writer.writeheader()
+            for info in duplicates_info:
+                writer.writerow(info)
+        print(f"\nList of duplicates and originals has been written to {output_file}")
+    except Exception as e:
+        print(f"Error writing to file {output_file}: {e}", file=sys.stderr)
 
     return duplicates_info
 
 def delete_duplicates(preferred_source_directories=None, output_file=None,
                       overwrite=False, append=False, simulate_delete=False, within_directory=None):
+    """
+    Delete duplicate files, optionally logging actions to a CSV file.
 
+    Args:
+        preferred_source_directories (list): List of directories with preference for selecting originals.
+        output_file (str): Path to the output CSV log file.
+        overwrite (bool): Whether to overwrite the output file if it exists.
+        append (bool): Whether to append to the output file if it exists.
+        simulate_delete (bool): If True, do not actually delete files.
+        within_directory (str): Only delete duplicates within this directory.
+    """
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     total_deleted = 0
 
@@ -441,8 +550,6 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
             else:
                 print(f"Error: Output file '{output_file}' already exists. Use --overwrite or --append to specify the desired behavior.", file=sys.stderr)
                 return
-        else:
-            file_mode = 'w'
 
         try:
             csvfile = open(output_file, file_mode, newline='', encoding='utf-8')
@@ -521,9 +628,11 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
 
     if simulate_delete:
         print("Note: Deletion was simulated. No files were actually deleted.")
-    return
 
 def remove_missing_files():
+    """
+    Remove entries from the database for files that no longer exist on disk.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT path FROM files')
@@ -547,9 +656,17 @@ def remove_missing_files():
 
     close_db_connection(conn)
     print(f"Total entries removed from database: {total_removed}")
-    
 
+# Main Function
 def main(directory, skip_existing=False, num_threads=None):
+    """
+    Main function to process files in the specified directory.
+
+    Args:
+        directory (str): The directory to process.
+        skip_existing (bool): If True, skip files that are already in the database.
+        num_threads (int): Number of threads to use for processing. Defaults to number of CPU cores.
+    """
     print("Initializing database and tables...")
     create_db_and_table()
 
@@ -612,8 +729,10 @@ def main(directory, skip_existing=False, num_threads=None):
         print("No new files to insert.")
 
     print("\nProcessing complete.")
-            
+
+# Entry Point
 if __name__ == "__main__":
+    # Argument parser and command handling
     parser = argparse.ArgumentParser(description='Process files and find duplicates.')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
