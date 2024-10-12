@@ -6,6 +6,7 @@ import hashlib
 import sqlite3
 import traceback
 import csv
+import xxhash
 from pathlib import Path, PurePath
 
 DB_NAME = 'file_data.db'
@@ -49,20 +50,7 @@ def process_file(file_path):
     try:
         os.lstat(file_path)
     except FileNotFoundError:
-        print(f"PyDupes: {file_path} no longer exists, removing from database")
-        # Remove from database
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute('DELETE FROM files WHERE path = ?', (str(file_path),))
-            conn.commit()
-        except sqlite3.Error as e:
-            print(f"Database error while deleting {file_path}: {e}")
-        finally:
-            close_db_connection(conn)
-        return None
-    except Exception as e:
-        print(f"Error accessing file {file_path}: {e}")
+        # Handle missing file
         return None
 
     print(f"PyDupes: Processing {file_path}")
@@ -72,13 +60,14 @@ def process_file(file_path):
         size = stat.st_size
         last_modified = datetime.datetime.fromtimestamp(stat.st_mtime)
 
-        # Calculate MD5 hash
+        # Calculate xxHash
+        hasher = xxhash.xxh64()
         with open(file_path, "rb") as f:
-            file_hash = hashlib.md5()
             while chunk := f.read(8192):
-                file_hash.update(chunk)
+                hasher.update(chunk)
 
-        return file_hash.hexdigest(), str(file_path), size, last_modified
+        file_hash = hasher.hexdigest()
+        return file_hash, str(file_path), size, last_modified
     except Exception as e:
         print(f"Error processing {file_path}: {str(e)}")
         traceback.print_exc()
@@ -343,12 +332,12 @@ def list_duplicates_csv(output_file, preferred_source_directories=None):
     return duplicates_info
 
 def delete_duplicates(preferred_source_directories=None, output_file=None,
-                      overwrite=False, append=False, simulate_delete=False):
+                      overwrite=False, append=False, simulate_delete=False, within_directory=None):
     import os
     import csv
+    from pathlib import Path
 
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
-
     total_deleted = 0
 
     writer = None
@@ -386,6 +375,8 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
         for group in duplicates_list:
             original_file_info = group['original']
             original_path = original_file_info['path']
+            original_path_normalized = os.path.normpath(original_path)
+
             if group['no_matching_original']:
                 status_flag = 'kept - no matching original'
                 print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
@@ -403,42 +394,39 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
                 writer.writerow(log_entry)
                 csvfile.flush()
 
-            if group['no_matching_original']:
-                # Log skipped duplicates
-                for dup_info in group['duplicates']:
-                    log_entry = {
-                        'status': 'skipped - no matching original',
-                        'path': dup_info['path'],
-                        'hash': group['hash']
-                    }
-                    if writer:
-                        writer.writerow(log_entry)
-                        csvfile.flush()
-            else:
-                for dup_info in group['duplicates']:
-                    dup_file = dup_info['path']
-                    try:
-                        if not simulate_delete:
-                            os.remove(dup_file)
-                            print(f"Deleted duplicate file: {dup_file}")
-                            status = 'deleted'
-                            total_deleted += 1
-                        else:
-                            print(f"Simulated deletion of duplicate file: {dup_file}")
-                            status = 'deleted (simulated)'
-                    except Exception as e:
-                        print(f"Error deleting file {dup_file}: {e}", file=sys.stderr)
-                        status = f'error - {e}'
+            for dup_info in group['duplicates']:
+                dup_file = dup_info['path']
+                dup_file_normalized = os.path.normpath(dup_file)
 
-                    # Log the duplicate file
-                    log_entry = {
-                        'status': status,
-                        'path': dup_file,
-                        'hash': group['hash']
-                    }
-                    if writer:
-                        writer.writerow(log_entry)
-                        csvfile.flush()
+                # When within_directory is specified, only delete duplicates within that directory
+                if within_directory:
+                    within_directory_normalized = os.path.normpath(os.path.abspath(within_directory))
+                    if not dup_file_normalized.startswith(within_directory_normalized):
+                        # Skip duplicates not within the specified directory
+                        continue
+
+                try:
+                    if not simulate_delete:
+                        os.remove(dup_file)
+                        print(f"Deleted duplicate file: {dup_file}")
+                        status = 'deleted'
+                        total_deleted += 1
+                    else:
+                        print(f"Simulated deletion of duplicate file: {dup_file}")
+                        status = 'deleted (simulated)'
+                except Exception as e:
+                    print(f"Error deleting file {dup_file}: {e}", file=sys.stderr)
+                    status = f'error - {e}'
+
+                # Log the duplicate file
+                log_entry = {
+                    'status': status,
+                    'path': dup_file,
+                    'hash': group['hash']
+                }
+                if writer:
+                    writer.writerow(log_entry)
+                    csvfile.flush()
     finally:
         # Ensure the CSV file is properly closed
         if csvfile:
@@ -544,15 +532,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Handling preferred directories
-    if args.prefer_directory:
-        preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
-    else:
-        preferred_directories = None
-
-    # Handling within-directory
-    within_directory = args.within_directory
-
     if args.command == 'process':
         directory_to_process = args.directory
         if not os.path.isdir(directory_to_process):
@@ -560,13 +539,44 @@ if __name__ == "__main__":
             sys.exit(1)
         skip_existing = args.skip_existing
         main(directory_to_process, skip_existing=skip_existing)
+
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
+
+    elif args.command == 'clean-db':
+        remove_missing_files()
+
     elif args.command == 'list-duplicates':
+        # Handle arguments specific to this command
+        if args.prefer_directory:
+            preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
+        else:
+            preferred_directories = None
+
+        within_directory = args.within_directory
+
         list_duplicates_excluding_original(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
+
     elif args.command == 'list-duplicates-csv':
+        # Handle arguments specific to this command
+        if args.prefer_directory:
+            preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
+        else:
+            preferred_directories = None
+
+        within_directory = args.within_directory
+
         list_duplicates_csv(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
+
     elif args.command == 'delete-duplicates':
+        # Handle arguments specific to this command
+        if args.prefer_directory:
+            preferred_directories = [d.strip() for d in args.prefer_directory.split(',')]
+        else:
+            preferred_directories = None
+
+        within_directory = args.within_directory
+
         delete_duplicates(
             preferred_source_directories=preferred_directories,
             output_file=args.output,
@@ -575,7 +585,6 @@ if __name__ == "__main__":
             simulate_delete=args.simulate_delete,
             within_directory=within_directory
         )
-    elif args.command == 'clean-db':
-        remove_missing_files()
+
     else:
         parser.print_help()
