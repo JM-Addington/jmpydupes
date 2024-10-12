@@ -4,12 +4,18 @@ import argparse
 import datetime
 import sqlite3
 import traceback
-import csv
+import logging
 import xxhash
-import concurrent.futures
-from pathlib import Path, PurePath
+from pathlib import Path
+from queue import Queue
+from threading import Thread, Lock
+from tqdm import tqdm
+from time import sleep
 
 DB_NAME = 'file_data.db'
+
+# Global list for processed data; shared between threads
+processed_data = []
 
 def create_db_and_table():
     with sqlite3.connect(DB_NAME) as conn:
@@ -73,33 +79,58 @@ def process_file(file_path):
         traceback.print_exc()
         return None  # Return None if there was an error
 
-def process_file_for_thread(file_path):
-    try:
+def worker_thread(file_queue, worker_pbar, overall_pbar, lock, thread_id):
+    while not file_queue.empty():
+        try:
+            file_path = file_queue.get_nowait()
+        except Exception:
+            break  # Queue is empty
+
         file_path = Path(file_path).resolve()
         if not file_path.exists():
-            print(f"File does not exist: {file_path}")
-            return None
+            with lock:
+                logging.warning(f"File does not exist: {file_path}")
+                overall_pbar.update(1)
+            continue
 
-        # Get file size and last modified time
-        stat = file_path.stat()
-        size = stat.st_size
-        last_modified = datetime.datetime.fromtimestamp(stat.st_mtime)
+        try:
+            # Get file size and last modified time
+            stat = file_path.stat()
+            size = stat.st_size
+            last_modified = datetime.datetime.fromtimestamp(stat.st_mtime)
 
-        # Calculate xxHash
-        hasher = xxhash.xxh64()
-        with open(file_path, "rb") as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                hasher.update(chunk)
-        file_hash = hasher.hexdigest()
+            # Reset the worker progress bar for the new file
+            with lock:
+                worker_pbar.reset(total=size)
+                worker_pbar.set_description(f"Thread {thread_id+1}: {file_path.name[:30]}")  # Truncate if necessary
 
-        return (file_hash, str(file_path), size, last_modified)
-    except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        traceback.print_exc()
-        return None
+            # Calculate xxHash and update progress
+            hasher = xxhash.xxh64()
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+                    with lock:
+                        worker_pbar.update(len(chunk))
+
+            file_hash = hasher.hexdigest()
+
+            # Store the result in the shared list
+            with lock:
+                processed_data.append((file_hash, str(file_path), size, last_modified))
+                overall_pbar.update(1)
+                logging.info(f"Processed file: {file_path}")
+
+        except Exception as e:
+            with lock:
+                logging.error(f"Error processing {file_path}: {e}")
+                traceback.print_exc()
+                overall_pbar.update(1)
+    # Close the worker progress bar when done
+    with lock:
+        worker_pbar.close()
 
 def insert_data(data):
     now = datetime.datetime.now()
@@ -304,7 +335,7 @@ def select_default_original(file_info):
     original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
     return original_candidates[0]
 
-def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None):
+def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None, within_directory=None):
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_excl_original = []
 
@@ -335,7 +366,9 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
 
     return duplicates_excl_original
 
-def list_duplicates_csv(output_file, preferred_source_directories=None):
+def list_duplicates_csv(output_file, preferred_source_directories=None, within_directory=None):
+    import csv
+
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_info = []
 
@@ -344,7 +377,7 @@ def list_duplicates_csv(output_file, preferred_source_directories=None):
         duplicates = group['duplicates']
 
         if group['no_matching_original']:
-            status_flag = 'duplicate - no matching original path'
+            status_flag = 'duplicate - no matching original'
             print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
         else:
             status_flag = 'original'
@@ -516,7 +549,7 @@ def remove_missing_files():
     print(f"Total entries removed from database: {total_removed}")
     
 
-def main(directory, skip_existing=False, num_threads=4):
+def main(directory, skip_existing=False, num_threads=None):
     print("Initializing database and tables...")
     create_db_and_table()
 
@@ -538,28 +571,45 @@ def main(directory, skip_existing=False, num_threads=4):
         print("No new files to process.")
         return
 
-    print(f"Processing {len(files_to_process)} files with {num_threads} threads per batch...")
+    if num_threads is None:
+        num_threads = os.cpu_count() or 1
 
-    # Process files in batches, batch size equals the number of threads
-    total_batches = (len(files_to_process) + num_threads - 1) // num_threads
-    for batch_num, i in enumerate(range(0, len(files_to_process), num_threads), start=1):
-        batch = files_to_process[i:i + num_threads]
-        print(f"\nProcessing batch {batch_num}/{total_batches}: {len(batch)} files")
-        
-        # Use ThreadPoolExecutor for multithreading
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            results = list(executor.map(process_file_for_thread, batch))
-        
-        # Filter out None results and prepare data for bulk insertion
-        data_to_insert = [data for data in results if data is not None]
-        
-        # Bulk insert into the database
-        if data_to_insert:
-            print(f"Inserting {len(data_to_insert)} records into the database...")
-            insert_data_batch(data_to_insert)
-            print("Database insertion complete.")
-        else:
-            print("No new files to insert in this batch.")
+    print(f"Processing {len(files_to_process)} files with {num_threads} threads...")
+
+    # Initialize the overall progress bar
+    overall_pbar = tqdm(total=len(files_to_process), desc="Total Progress", position=0, unit='file', leave=True)
+    # Create a queue for file processing
+    file_queue = Queue()
+    for file in files_to_process:
+        file_queue.put(file)
+
+    # Create a lock for thread-safe operations
+    lock = Lock()
+
+    # Create and start worker threads
+    threads = []
+    for thread_id in range(num_threads):
+        worker_pbar = tqdm(total=0, desc=f"Thread {thread_id+1}", position=thread_id+1, unit='B', unit_scale=True, leave=True)
+        t = Thread(target=worker_thread, args=(file_queue, worker_pbar, overall_pbar, lock, thread_id))
+        t.start()
+        threads.append(t)
+
+    # Wait for all threads to finish
+    for t in threads:
+        t.join()
+
+    # Close the progress bars
+    overall_pbar.close()
+    for thread_id in range(num_threads):
+        tqdm._instances.clear()  # Clear instances to prevent warnings
+
+    print("\nInserting records into the database...")
+    # Bulk insert into the database
+    if processed_data:
+        insert_data_batch(processed_data)
+        print("Database insertion complete.")
+    else:
+        print("No new files to insert.")
 
     print("\nProcessing complete.")
             
@@ -571,9 +621,12 @@ if __name__ == "__main__":
     # Subparser for the 'process' command
     parser_process = subparsers.add_parser('process', help='Process a directory to find duplicates')
     parser_process.add_argument('directory', help='Directory to process')
-    parser_process.add_argument('--skip-existing', action='store_true', help='Skip processing files that are already in the database')
-    parser_process.add_argument('--threads', type=int, default=4, help='Number of threads per batch for hashing')
-
+    parser_process.add_argument('--skip-existing', action='store_true',
+                                help='Skip processing files that are already in the database')
+    default_threads = os.cpu_count() or 1
+    parser_process.add_argument('--threads', type=int, default=default_threads,
+                                help='Number of threads for hashing (default: number of CPU cores)')
+    parser_process.add_argument('--log-file', help='Path to log file for detailed output')
 
     # Subparser for the 'rescan-duplicates' command
     parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
@@ -583,26 +636,38 @@ if __name__ == "__main__":
     # Subparser for the 'list-duplicates' command
     parser_list = subparsers.add_parser('list-duplicates', help='List duplicates excluding originals')
     parser_list.add_argument('-o', '--output', help='Output file to write the list to')
-    parser_list.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
+    parser_list.add_argument('--prefer-directory',
+                             help='Preferred source directories for selecting original files (comma-separated if multiple)')
     parser_list.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     # Subparser for the 'list-duplicates-csv' command
     parser_csv = subparsers.add_parser('list-duplicates-csv', help='List duplicates and originals in CSV format')
     parser_csv.add_argument('-o', '--output', required=True, help='Output CSV file to write the list to')
-    parser_csv.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
+    parser_csv.add_argument('--prefer-directory',
+                            help='Preferred source directories for selecting original files (comma-separated if multiple)')
     parser_csv.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     # Subparser for the 'delete-duplicates' command
     parser_delete = subparsers.add_parser('delete-duplicates', help='Delete duplicate files')
-    parser_delete.add_argument('--prefer-directory', help='Preferred source directories for selecting original files (comma-separated if multiple)')
+    parser_delete.add_argument('--prefer-directory',
+                               help='Preferred source directories for selecting original files (comma-separated if multiple)')
     parser_delete.add_argument('-o', '--output', help='Output CSV file to log the deleted files')
     group = parser_delete.add_mutually_exclusive_group()
     group.add_argument('--overwrite', action='store_true', help='Overwrite the output file if it exists')
     group.add_argument('--append', action='store_true', help='Append to the output file if it exists')
-    parser_delete.add_argument('--simulate-delete', action='store_true', help='Simulate deletion without actually deleting files')
+    parser_delete.add_argument('--simulate-delete', action='store_true',
+                               help='Simulate deletion without actually deleting files')
     parser_delete.add_argument('--within-directory', help='Only examine duplicates within this directory')
 
     args = parser.parse_args()
+
+    # Set up logging
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    if getattr(args, 'log_file', None):
+        logging.basicConfig(filename=args.log_file, level=logging.INFO, format=log_format)
+    else:
+        # Set logging level to WARNING to suppress INFO messages in console
+        logging.basicConfig(level=logging.WARNING, format=log_format)
 
     if args.command == 'process':
         directory_to_process = args.directory
@@ -612,7 +677,6 @@ if __name__ == "__main__":
         skip_existing = args.skip_existing
         num_threads = args.threads
         main(directory_to_process, skip_existing=skip_existing, num_threads=num_threads)
-
 
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
@@ -629,7 +693,11 @@ if __name__ == "__main__":
 
         within_directory = args.within_directory
 
-        list_duplicates_excluding_original(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
+        list_duplicates_excluding_original(
+            output_file=args.output,
+            preferred_source_directories=preferred_directories,
+            within_directory=within_directory
+        )
 
     elif args.command == 'list-duplicates-csv':
         # Handle arguments specific to this command
@@ -640,7 +708,11 @@ if __name__ == "__main__":
 
         within_directory = args.within_directory
 
-        list_duplicates_csv(output_file=args.output, preferred_source_directories=preferred_directories, within_directory=within_directory)
+        list_duplicates_csv(
+            output_file=args.output,
+            preferred_source_directories=preferred_directories,
+            within_directory=within_directory
+        )
 
     elif args.command == 'delete-duplicates':
         # Handle arguments specific to this command
