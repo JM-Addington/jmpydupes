@@ -430,7 +430,7 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
     Returns:
         list: A list of duplicate file paths excluding the original files.
     """
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_directories, within_directory=within_directory)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_excl_original = []
 
     for group in duplicates_list:
