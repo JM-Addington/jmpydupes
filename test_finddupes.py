@@ -35,8 +35,12 @@ def setup_test_data():
         shutil.rmtree(base_dir)
     
     # Create directories
-    dirs = ['dir1', 'dir2', 'dir3']
-    subdirs = {'dir1': ['subdir1'], 'dir2': ['subdir2']}
+    dirs = ['dir1', 'dir2', 'dir3', 'dir4']  # Added 'dir4'
+    subdirs = {
+        'dir1': ['subdir1'],
+        'dir2': ['subdir2'],
+        'dir4': ['subdir3']  # Added 'subdir3' under 'dir4'
+    }
     
     for d in dirs:
         os.makedirs(os.path.join(base_dir, d))
@@ -49,12 +53,17 @@ def setup_test_data():
     # Create files with known content
     files = [
         # (relative path, content)
-        ('dir1/file1.txt', '11111'),  # Duplicate in dir2
+        ('dir1/file1.txt', '11111'),  # Duplicate in dir2 and dir4
         ('dir2/file1.txt', '11111'),  # Duplicate of dir1/file1.txt
+        ('dir4/file1.txt', '11111'),  # Duplicate of dir1/file1.txt
+        
         ('dir1/file2.txt', '22222'),  # Unique
         ('dir2/file4.txt', '33333'),  # Unique
-        ('dir1/subdir1/file3.txt', '44444'),  # Duplicate in dir2/subdir2
+        
+        ('dir1/subdir1/file3.txt', '44444'),  # Duplicate in dir2/subdir2 and dir4/subdir3
         ('dir2/subdir2/file3.txt', '44444'),  # Duplicate of dir1/subdir1/file3.txt
+        ('dir4/subdir3/file3.txt', '44444'),  # Duplicate of dir1/subdir1/file3.txt
+        
         ('dir3/file5.txt', '55555'),  # Unique
     ]
     
@@ -135,6 +144,55 @@ def test_processing_additional_directory():
     
     assert all(file in duplicates for file in expected_duplicates), "Expected duplicates not found."
     assert len(duplicates) == len(expected_duplicates), "Unexpected duplicates found."
+
+def test_multiple_preferred_directories():
+    """
+    Test with multiple preferred directories to ensure preference order is respected.
+    """
+    # Process dir4 with skip_existing to avoid reprocessing files
+    main('./test/dir4', skip_existing=True, num_threads=2)
+    
+    # Get absolute paths for preferred directories, in order of preference
+    # dir1 has highest preference, dir4 is next
+    preferred_dirs = [
+        str(Path('./test/dir1').resolve()),
+        str(Path('./test/dir4').resolve()),
+    ]
+    
+    # List duplicates across all directories, preferring dir1 and then dir4
+    duplicates = list_duplicates_excluding_original(
+        preferred_source_directories=preferred_dirs
+    )
+    
+    # Expected duplicates should be in dir2
+    expected_duplicates = [
+        str(Path('./test/dir2/file1.txt').resolve()),
+        str(Path('./test/dir2/subdir2/file3.txt').resolve()),
+    ]
+    
+    # Duplicates in dir4 should not appear since it's a preferred directory after dir1
+    duplicates_in_dir4 = [
+        str(Path('./test/dir4/file1.txt').resolve()),
+        str(Path('./test/dir4/subdir3/file3.txt').resolve()),
+    ]
+    
+    # Verify that duplicates in dir2 are identified
+    assert all(file in duplicates for file in expected_duplicates), "Expected duplicates in dir2 not found."
+    
+    # Verify that duplicates in dir4 are not included since dir4 is a preferred directory
+    assert all(file not in duplicates for file in duplicates_in_dir4), "Duplicates in dir4 should not be considered for deletion."
+    
+    # Check that the total number of duplicates matches the expected number
+    assert len(duplicates) == len(expected_duplicates), "Unexpected number of duplicates found."
+
+    # Optionally, perform deletion to see if the script deletes the correct files
+    delete_duplicates(
+        preferred_source_directories=preferred_dirs,
+        simulate_delete=True
+    )
+    # Ensure files in dir4 are not deleted
+    for file in duplicates_in_dir4:
+        assert os.path.exists(file), f"File {file} in preferred directory should not be deleted."
 
 def test_simulated_deletion():
     """
@@ -221,6 +279,7 @@ if __name__ == '__main__':
         test_process()
         test_list_duplicates_within_directory()
         test_processing_additional_directory()
+        test_multiple_preferred_directories()
         test_simulated_deletion()
         test_actual_deletion()
         test_csv_output()
