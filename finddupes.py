@@ -6,6 +6,7 @@ import sqlite3
 import traceback
 import csv
 import xxhash
+import concurrent.futures
 from pathlib import Path, PurePath
 
 DB_NAME = 'file_data.db'
@@ -72,6 +73,34 @@ def process_file(file_path):
         traceback.print_exc()
         return None  # Return None if there was an error
 
+def process_file_for_thread(file_path):
+    try:
+        file_path = Path(file_path).resolve()
+        if not file_path.exists():
+            print(f"File does not exist: {file_path}")
+            return None
+
+        # Get file size and last modified time
+        stat = file_path.stat()
+        size = stat.st_size
+        last_modified = datetime.datetime.fromtimestamp(stat.st_mtime)
+
+        # Calculate xxHash
+        hasher = xxhash.xxh64()
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        file_hash = hasher.hexdigest()
+
+        return (file_hash, str(file_path), size, last_modified)
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+        traceback.print_exc()
+        return None
+
 def insert_data(data):
     now = datetime.datetime.now()
     conn = get_db_connection()
@@ -108,6 +137,26 @@ def insert_data(data):
     finally:
         close_db_connection(conn)
 
+def insert_data_batch(data_list):
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        sql = '''
+        INSERT OR REPLACE INTO files (hash, path, size, last_modified, last_checked)
+        VALUES (?, ?, ?, ?, ?)
+        '''
+        now = datetime.datetime.now()
+        data_with_timestamp = [(*data, now) for data in data_list]
+        cursor.executemany(sql, data_with_timestamp)
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Database error during batch insert: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"Error during batch insert: {e}", file=sys.stderr)
+        traceback.print_exc()
+    finally:
+        close_db_connection(conn)
+
 def walk_directory(directory):
     for root, dirs, files in os.walk(directory, topdown=True, onerror=None, followlinks=False):
         for name in files:
@@ -118,6 +167,15 @@ def walk_directory(directory):
 
         # Handle permission errors for directories
         dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
+
+def load_existing_paths():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT path FROM files')
+    rows = cursor.fetchall()
+    close_db_connection(conn)
+    existing_paths = set(row[0] for row in rows)
+    return existing_paths
 
 # Rescan duplicates
 def rescan_duplicates():
@@ -458,35 +516,53 @@ def remove_missing_files():
     print(f"Total entries removed from database: {total_removed}")
     
 
-def main(directory, skip_existing=False):
-    # Create database and table if they don't exist
+def main(directory, skip_existing=False, num_threads=4):
+    print("Initializing database and tables...")
     create_db_and_table()
 
+    print(f"Scanning directory: {directory}")
     # Get all files in the specified directory and subdirectories
-    files = walk_directory(directory)
+    files = list(walk_directory(directory))
+    print(f"Total files found: {len(files)}")
 
-    existing_paths = set()
+    # Exclude existing files if skip_existing is True
     if skip_existing:
-        print("Loading existing file paths from database...")
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT path FROM files')
-        rows = cursor.fetchall()
-        existing_paths = {row[0] for row in rows}
-        print(f"Loaded {len(existing_paths)} existing file paths.")
-        close_db_connection(conn)
+        print("Loading existing file paths from database to skip already processed files...")
+        existing_paths = load_existing_paths()
+        files_to_process = [file for file in files if str(Path(file).resolve()) not in existing_paths]
+        print(f"Files to process after skipping existing: {len(files_to_process)}")
+    else:
+        files_to_process = files
 
-    for file in files:
-        file_path = Path(file).resolve()
+    if not files_to_process:
+        print("No new files to process.")
+        return
 
-        if skip_existing and str(file_path) in existing_paths:
-            print(f"PyDupes: Skipping {file_path} (already in database)")
-            continue
+    print(f"Processing {len(files_to_process)} files with {num_threads} threads per batch...")
 
-        data = process_file(file_path)
-        if data is not None:
-            insert_data(data)
+    # Process files in batches, batch size equals the number of threads
+    total_batches = (len(files_to_process) + num_threads - 1) // num_threads
+    for batch_num, i in enumerate(range(0, len(files_to_process), num_threads), start=1):
+        batch = files_to_process[i:i + num_threads]
+        print(f"\nProcessing batch {batch_num}/{total_batches}: {len(batch)} files")
+        
+        # Use ThreadPoolExecutor for multithreading
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            results = list(executor.map(process_file_for_thread, batch))
+        
+        # Filter out None results and prepare data for bulk insertion
+        data_to_insert = [data for data in results if data is not None]
+        
+        # Bulk insert into the database
+        if data_to_insert:
+            print(f"Inserting {len(data_to_insert)} records into the database...")
+            insert_data_batch(data_to_insert)
+            print("Database insertion complete.")
+        else:
+            print("No new files to insert in this batch.")
 
+    print("\nProcessing complete.")
+            
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process files and find duplicates.')
 
@@ -496,6 +572,8 @@ if __name__ == "__main__":
     parser_process = subparsers.add_parser('process', help='Process a directory to find duplicates')
     parser_process.add_argument('directory', help='Directory to process')
     parser_process.add_argument('--skip-existing', action='store_true', help='Skip processing files that are already in the database')
+    parser_process.add_argument('--threads', type=int, default=4, help='Number of threads per batch for hashing')
+
 
     # Subparser for the 'rescan-duplicates' command
     parser_rescan = subparsers.add_parser('rescan-duplicates', help='Rescan duplicate files')
@@ -532,7 +610,9 @@ if __name__ == "__main__":
             print(f"Error: {directory_to_process} is not a valid directory", file=sys.stderr)
             sys.exit(1)
         skip_existing = args.skip_existing
-        main(directory_to_process, skip_existing=skip_existing)
+        num_threads = args.threads
+        main(directory_to_process, skip_existing=skip_existing, num_threads=num_threads)
+
 
     elif args.command == 'rescan-duplicates':
         rescan_duplicates()
