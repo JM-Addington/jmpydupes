@@ -449,23 +449,6 @@ def select_original(files, preferred_source_directories=None):
     return original, files
 
 
-def select_default_original(file_info):
-    """
-    Select the default original file from a list of file info dictionaries.
-
-    Args:
-        file_info (list): A list of dictionaries containing file information.
-
-    Returns:
-        dict: A dictionary containing information about the selected original file.
-    """
-    # Default selection: least number of folders, then shortest path length
-    min_num_folders = min(info['num_folders'] for info in file_info)
-    candidates = [info for info in file_info if info['num_folders'] == min_num_folders]
-    min_path_length = min(info['path_length'] for info in candidates)
-    original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
-    return original_candidates[0]
-
 def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None, within_directory=None):
     """
     List duplicates excluding the original file.
