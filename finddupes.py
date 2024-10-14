@@ -14,6 +14,17 @@ from tqdm import tqdm
 # Global list for processed data; shared between threads
 processed_data = []
 
+import signal
+
+def signal_handler(sig, frame):
+    print("\nInterrupt received. Saving progress and exiting...")
+    if processed_data:
+        insert_data_batch(processed_data)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+
+
 # Database Functions
 def create_db_and_table():
     """
@@ -685,16 +696,48 @@ def remove_missing_files():
     close_db_connection(conn)
     print(f"Total entries removed from database: {total_removed}")
 
-# Main Function
-def main(directory, skip_existing=False, num_threads=None):
+def process_batch(files, num_threads, overall_pbar):
     """
-    Main function to process files in the specified directory.
+    Process a batch of files using X threads.
 
     Args:
-        directory (str): The directory to process.
-        skip_existing (bool): If True, skip files that are already in the database.
-        num_threads (int): Number of threads to use for processing. Defaults to number of CPU cores.
+        files (list): List of file paths to process.
+        num_threads (int): Number of threads to use.
+        overall_pbar (tqdm): Overall progress bar.
+
+    Returns:
+        list: Processed data from the batch.
     """
+    from threading import Thread
+
+    batch_processed_data = []
+    threads = []
+    lock = Lock()
+
+    # Define worker function
+    def worker(file_path):
+        result = process_file(file_path)
+        if result:
+            with lock:
+                batch_processed_data.append(result)
+        with lock:
+            overall_pbar.update(1)
+
+    # Start threads for the batch
+    for file_path in files:
+        t = Thread(target=worker, args=(file_path,))
+        t.start()
+        threads.append(t)
+
+    # Wait for all threads in the batch to finish
+    for t in threads:
+        t.join()
+
+    return batch_processed_data
+
+
+# Main Function
+def main(directory, skip_existing=False, num_threads=None):
     print("Initializing database and tables...")
     create_db_and_table()
 
@@ -716,47 +759,39 @@ def main(directory, skip_existing=False, num_threads=None):
         print("No new files to process.")
         return
 
-    if num_threads is None:
-        num_threads = os.cpu_count() or 1
-
-    print(f"Processing {len(files_to_process)} files with {num_threads} threads...")
+    print(f"Processing files with {num_threads} threads in batches of {num_threads} files...")
+    total_files = len(files_to_process)
+    batches = [files_to_process[i:i + num_threads] for i in range(0, total_files, num_threads)]
 
     # Initialize the overall progress bar
-    overall_pbar = tqdm(total=len(files_to_process), desc="Total Progress", position=0, unit='file', leave=True)
-    # Create a queue for file processing
-    file_queue = Queue()
-    for file in files_to_process:
-        file_queue.put(file)
+    overall_pbar = tqdm(total=total_files, desc="Total Progress", unit='file', leave=True)
 
-    # Create a lock for thread-safe operations
-    lock = Lock()
+    for batch_num, batch_files in enumerate(batches, start=1):
+        print(f"\nProcessing batch {batch_num}/{len(batches)}...")
+        batch_processed_data = []
 
-    # Create and start worker threads
-    threads = []
-    for thread_id in range(num_threads):
-        worker_pbar = tqdm(total=0, desc=f"Thread {thread_id+1}", position=thread_id+1, unit='B', unit_scale=True, leave=True)
-        t = Thread(target=worker_thread, args=(file_queue, worker_pbar, overall_pbar, lock, thread_id))
-        t.start()
-        threads.append(t)
+        threads = []
+        for file_path in batch_files:
+            t = Thread(target=process_file_wrapper, args=(file_path, batch_processed_data))
+            t.start()
+            threads.append(t)
 
-    # Wait for all threads to finish
-    for t in threads:
-        t.join()
+        for t in threads:
+            t.join()
+            overall_pbar.update(1)
 
-    # Close the progress bars
+        # Insert data into the database after each batch
+        if batch_processed_data:
+            insert_data_batch(batch_processed_data)
+
     overall_pbar.close()
-    for thread_id in range(num_threads):
-        tqdm._instances.clear()  # Clear instances to prevent warnings
-
-    print("\nInserting records into the database...")
-    # Bulk insert into the database
-    if processed_data:
-        insert_data_batch(processed_data)
-        print("Database insertion complete.")
-    else:
-        print("No new files to insert.")
-
     print("\nProcessing complete.")
+
+def process_file_wrapper(file_path, batch_processed_data):
+    result = process_file(file_path)
+    if result:
+        batch_processed_data.append(result)
+
 
 # Entry Point
 if __name__ == "__main__":
