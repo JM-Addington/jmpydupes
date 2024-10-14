@@ -3,3 +3,11 @@ venv/
 file_data.db
 __pycache__/*
 *.pyc
+/.idea/.gitignore
+/dupes.csv
+/.idea/jmpydupes.iml
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/inspectionProfiles/Project_Default.xml
+/.idea/vcs.xml
