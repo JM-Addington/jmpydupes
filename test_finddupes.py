@@ -267,6 +267,62 @@ def test_multiple_preferred_directories(setup_environment):
     # Verify that duplicates in dir2 are identified
     assert all(file in duplicates for file in expected_duplicates), "Expected duplicates not found."
 
+
+def test_by_depth(setup_environment):
+    """
+    Test that duplicates are identified by depth.
+
+    """
+    # Create files with known content
+    files_to_create = [
+        (base_dir + '/dir1/file1.txt', '11111'),
+        (base_dir + '/dir2/subdir2/file1.txt', '11111'),
+    ]
+
+    setup_test_data(files_to_create)
+
+    main(base_dir, skip_existing=False, num_threads=2)
+
+    duplicates = list_duplicates_excluding_original()
+
+    expected_duplicates = [
+        str(Path(base_dir + '/dir2/subdir2/file1.txt').resolve())
+    ]
+
+    # Check that the second file was returned as one to be deleted:
+    assert all(file in duplicates for file in expected_duplicates), "Expected duplicates not found."
+
+    # Check that the other files was NOT returned
+    assert (Path(base_dir + '/dir1/file1.txt').resolve() not in duplicates), "Unexpected duplicate found."
+
+def test_by_alphabetic(setup_environment):
+    """
+    Test that duplicates are identified by depth.
+
+    """
+    # Create files with known content
+    files_to_create = [
+        (base_dir + '/zxy/file1.txt', '11111'),
+        (base_dir + '/abc/file1.txt', '11111'),
+    ]
+
+    setup_test_data(files_to_create)
+
+    main(base_dir, skip_existing=False, num_threads=2)
+
+    duplicates = list_duplicates_excluding_original()
+
+    expected_duplicates = [
+        str(Path(base_dir + '/zxy/file1.txt').resolve())
+    ]
+
+    # Check that the second file was returned as one to be deleted:
+    assert all(file in duplicates for file in expected_duplicates), "Expected duplicates not found."
+
+    # Check that the other files was NOT returned
+    assert (Path(base_dir + '/abc/file1.txt').resolve() not in duplicates), "Unexpected duplicate found."
+
+
 def test_simulated_deletion(setup_environment):
     """
     Test simulated deletion of duplicates.
