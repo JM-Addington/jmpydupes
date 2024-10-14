@@ -11,8 +11,6 @@ from queue import Queue
 from threading import Thread, Lock
 from tqdm import tqdm
 
-DB_NAME = 'file_data.db'
-
 # Global list for processed data; shared between threads
 processed_data = []
 
@@ -22,6 +20,8 @@ def create_db_and_table():
     Create the SQLite database and the files table if they don't exist.
     Also creates an index on the hash column for faster queries.
     """
+    DB_NAME = os.environ.get('DB_NAME', 'file_data.db')
+
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -46,6 +46,8 @@ def get_db_connection():
     Returns:
         sqlite3.Connection: An open connection to the database.
     """
+    DB_NAME = os.environ.get('DB_NAME', 'file_data.db')
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     # Create index on hash if it doesn't exist
@@ -317,11 +319,18 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
         within_directory = os.path.normpath(os.path.abspath(within_directory))
         cursor.execute('''
         SELECT hash, path FROM files WHERE path LIKE ?
-        ''', (f'{within_directory}%',))
+        AND hash in 
+            (SELECT hash from files
+             WHERE path LIKE ?
+             GROUP BY hash HAVING COUNT(*) > 1)
+        ''', (f'{within_directory}%',f'{within_directory}%'))
     else:
         # Get all files
         cursor.execute('''
         SELECT hash, path FROM files
+        WHERE hash in 
+            (SELECT hash from files
+             GROUP BY hash HAVING COUNT(*) > 1)
         ''')
     all_files = cursor.fetchall()
 
@@ -330,76 +339,115 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
     for file_hash, file_path in all_files:
         files_by_hash.setdefault(file_hash, []).append(file_path)
 
+    unique_hashes = set(files_by_hash.keys())
     duplicates_list = []
 
     for file_hash, paths in files_by_hash.items():
         if len(paths) < 2:
             continue  # Not enough files for duplicates
 
-        # Prepare a list to hold file info
-        file_info = []
-        for file_path in paths:
-            file_path_normalized = os.path.normpath(file_path)
-            # Skip files not within the specified directory
-            if within_directory and not file_path_normalized.startswith(within_directory):
-                continue
-            # Create a PurePath object
-            path_obj = PurePath(file_path)
-            # Number of folders is total parts minus 1 (for the file name)
-            num_folders = len(path_obj.parts) - 1
-            # Length of the entire path string
-            path_length = len(str(path_obj))
-            # Determine the preference level based on preferred directories
-            preference_level = None
-            if preferred_source_directories:
-                for index, preferred_dir in enumerate(preferred_source_directories):
-                    preferred_path = PurePath(preferred_dir)
-                    if preferred_path in path_obj.parents or preferred_path == path_obj.parent:
-                        preference_level = index  # Lower index means higher preference
-                        break  # Stop at the first match
-            file_info.append({
-                'path': file_path,
-                'num_folders': num_folders,
-                'path_length': path_length,
-                'hash': file_hash,
-                'preference_level': preference_level  # None if not in preferred directories
-            })
+    # Process each group of duplicates
+    for file_hash in unique_hashes:
+        # Get the list of paths for this hash
+        files = files_by_hash[file_hash]
 
-        if len(file_info) < 2:
-            continue  # Not enough files after filtering
+        # Select the original file
+        original, duplicates = select_original(files, preferred_source_directories=preferred_source_directories)
 
-        original_file_info = None
-        no_matching_original = False
-
-        if preferred_source_directories:
-            # Same selection logic as before
-            preferred_files = [info for info in file_info if info['preference_level'] is not None]
-            if preferred_files:
-                min_preference = min(info['preference_level'] for info in preferred_files)
-                highest_pref_files = [info for info in preferred_files if info['preference_level'] == min_preference]
-                min_num_folders = min(info['num_folders'] for info in highest_pref_files)
-                candidates = [info for info in highest_pref_files if info['num_folders'] == min_num_folders]
-                min_path_length = min(info['path_length'] for info in candidates)
-                original_candidates = [info for info in candidates if info['path_length'] == min_path_length]
-                original_file_info = original_candidates[0]
-            else:
-                no_matching_original = True
-                original_file_info = select_default_original(file_info)
-        else:
-            original_file_info = select_default_original(file_info)
-
-        # Collect the duplicates excluding the original
-        duplicates = [info for info in file_info if info['path'] != original_file_info['path']]
-
+        # Add the duplicates to the list
         duplicates_list.append({
             'hash': file_hash,
-            'original': original_file_info,
+            'original': original,
             'duplicates': duplicates,
-            'no_matching_original': no_matching_original
+            'no_matching_original': False
         })
 
     close_db_connection(conn)
     return duplicates_list
+from pathlib import PurePath
+
+def select_original(files, preferred_source_directories=None):
+    """
+    Select the original file from a list of duplicate files.
+    The original is decided based on whether a preferred directory is specified, and found, then
+    by the fewest folders, shortest path, and alphabetical order.
+
+    :param files: List of files to check
+    :param preferred_source_directories: List of directories to prefer when selecting the original
+    :return: Tuple containing the original file and the list of remaining files
+    """
+
+    ###### Preferred directory logic ######
+    preferred_directory_files = []
+    if preferred_source_directories:
+        for directory in preferred_source_directories:
+            print(f"Checking for original in preferred directory: {directory}")
+            for file in files:
+                print(file)
+                if file.startswith(directory):
+                    print(f"Found match in {file} for directory {directory}")
+                    preferred_directory_files.append(file)
+
+            # We found one or more files in the preferred directory, so we can break the loop
+            if preferred_directory_files:
+                break
+
+    # If we found one and only one, it must be the original
+    if len(preferred_directory_files) == 1:
+        original = preferred_directory_files[0]
+        files.remove(original)
+        return original, files
+
+    # If no preferred directory files are found, use all files
+    if not preferred_directory_files:
+        preferred_directory_files = files.copy()
+
+    ###### Fewest folders logic ######
+    # If we found more than one file in the preferred directory,
+    # we need to select the original from them
+    # Add the number of folders to each file info
+    files_by_folders = {}
+    for file in preferred_directory_files:
+        path_obj = PurePath(file)
+        num_folders = len(path_obj.parts) - 1  # Subtract 1 to exclude the file name
+        files_by_folders.setdefault(num_folders, []).append(file)
+
+    # Find the fewest number of folders
+    fewest_folders = min(files_by_folders.keys())
+    fewest_folder_files = files_by_folders[fewest_folders]
+
+    # If there is only one file with the fewest number of folders
+    if len(fewest_folder_files) == 1:
+        original = fewest_folder_files[0]
+        files.remove(original)
+        return original, files
+
+    ###### Shortest path logic ######
+    # From the files with the fewest folders, find those with the shortest path length
+    files_by_path_length = {}
+    for file in fewest_folder_files:
+        path_length = len(file)
+        files_by_path_length.setdefault(path_length, []).append(file)
+
+    # Find the minimum path length
+    min_path_length = min(files_by_path_length.keys())
+    min_path_length_files = files_by_path_length[min_path_length]
+
+    # If there is only one file with the shortest path length
+    if len(min_path_length_files) == 1:
+        original = min_path_length_files[0]
+        files.remove(original)
+        return original, files
+
+    ###### Alphabetical logic ######
+    # Sort the files alphabetically
+    alphabetical_files = sorted(min_path_length_files)
+
+    # Select the first file alphabetically
+    original = alphabetical_files[0]
+    files.remove(original)
+    return original, files
+
 
 def select_default_original(file_info):
     """
@@ -425,7 +473,8 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
     Args:
         output_file (str): Path to the output file where the list will be written. If None, prints to console.
         preferred_source_directories (list): List of directories with preference for selecting originals.
-        within_directory (str): Only examine duplicates within this directory.
+        within_directory (str): Only examine duplicates within this directory. I.e., only look for files that are
+        duplicated within this directory.
 
     Returns:
         list: A list of duplicate file paths excluding the original files.
@@ -434,13 +483,13 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
     duplicates_excl_original = []
 
     for group in duplicates_list:
-        original_file = group['original']['path']
-        duplicates = [info['path'] for info in group['duplicates']]
+        original_file = group['original']
+        duplicates = group['duplicates']
 
         if group['no_matching_original']:
             print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
         else:
-            print(f"Original file for hash {group['hash']}: {original_file}")
+            print(f"Original file for duplicated hash {group['hash']}: {original_file}")
 
         duplicates_excl_original.extend(duplicates)
 
@@ -478,7 +527,7 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
     duplicates_info = []
 
     for group in duplicates_list:
-        original_file_info = group['original']
+        original = group['original']
         duplicates = group['duplicates']
 
         if group['no_matching_original']:
@@ -486,20 +535,20 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
             print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
         else:
             status_flag = 'original'
-            print(f"Original file for hash {group['hash']}: {original_file_info['path']}")
+            print(f"Original file for hash {group['hash']}: {original}")
 
         # Add original file info
         duplicates_info.append({
             'status': status_flag,
-            'path': original_file_info['path'],
+            'path': original,
             'hash': group['hash']
         })
 
         # Add duplicates info
-        for info in duplicates:
+        for duplicate in duplicates:
             duplicates_info.append({
                 'status': 'duplicate',
-                'path': info['path'],
+                'path': duplicate,
                 'hash': group['hash']
             })
 
@@ -533,6 +582,7 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
     """
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     total_deleted = 0
+    deleted_files = []
 
     writer = None
     csvfile = None
@@ -565,9 +615,7 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
 
     try:
         for group in duplicates_list:
-            original_file_info = group['original']
-            original_path = original_file_info['path']
-            original_path_normalized = os.path.normpath(original_path)
+            original_path = group['original']
 
             if group['no_matching_original']:
                 status_flag = 'kept - no matching original'
@@ -586,16 +634,7 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
                 writer.writerow(log_entry)
                 csvfile.flush()
 
-            for dup_info in group['duplicates']:
-                dup_file = dup_info['path']
-                dup_file_normalized = os.path.normpath(dup_file)
-
-                # When within_directory is specified, only delete duplicates within that directory
-                if within_directory:
-                    within_directory_normalized = os.path.normpath(os.path.abspath(within_directory))
-                    if not dup_file_normalized.startswith(within_directory_normalized):
-                        # Skip duplicates not within the specified directory
-                        continue
+            for dup_file in group['duplicates']:
 
                 try:
                     if not simulate_delete:
@@ -603,9 +642,13 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
                         print(f"Deleted duplicate file: {dup_file}")
                         status = 'deleted'
                         total_deleted += 1
+                        deleted_files.append(dup_file)
                     else:
                         print(f"Simulated deletion of duplicate file: {dup_file}")
                         status = 'deleted (simulated)'
+                        deleted_files.append(dup_file)
+                        total_deleted += 1
+
                 except Exception as e:
                     print(f"Error deleting file {dup_file}: {e}", file=sys.stderr)
                     status = f'error - {e}'
@@ -628,6 +671,8 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
 
     if simulate_delete:
         print("Note: Deletion was simulated. No files were actually deleted.")
+
+    return deleted_files
 
 def remove_missing_files():
     """
