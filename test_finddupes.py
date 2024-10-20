@@ -1,7 +1,6 @@
 import os
 import shutil
 import xxhash
-import time
 from pathlib import Path
 import pytest
 
@@ -22,7 +21,7 @@ from finddupes import (
     load_existing_paths,
     rescan_duplicates,
     get_duplicates,
-    select_default_original,
+    select_original,
     list_duplicates_excluding_original,
     list_duplicates_csv,
     delete_duplicates,
@@ -226,7 +225,7 @@ def test_multiple_preferred_directories(setup_environment):
 
     setup_test_data(files_to_create)
 
-    main(base_dir)
+    main(base_dir, num_threads=4)
 
     # Get absolute paths for preferred directories, in order of preference
     # dir1-no_dupes has highest preference, dir4 is next
@@ -441,3 +440,43 @@ def test_clean_db(setup_environment):
     result = cursor.fetchone()
     conn.close()
     assert result is None, "Missing file was not removed from the database."
+
+
+def test_keep_originals_in_preferred_directory(setup_environment):
+    """
+    This test ensures that duplicate files are deleted from all other directories but kept in
+    preferred directory.
+    """
+    # Create files to test scenario
+    files_to_create = [
+        (base_dir + '/file1.txt', '11111'),
+        (base_dir + '/file2.txt', '22222'),
+        (base_dir + '/file3.txt', '33333'),
+
+        # Creating duplicates in base directory
+        (base_dir + '/file4.txt', '22222'),
+        (base_dir + '/file5.txt', '33333'),
+
+        # Creating files in preferred directory
+        (base_dir + '/preferred_directory/file1.txt', '11111'),
+        (base_dir + '/preferred_directory/file2.txt', '22222'),
+        (base_dir + '/preferred_directory/file3.txt', '33333'),
+
+        # Creating duplicates in another directory
+        (base_dir + '/another_directory/file1.txt', '11111'),
+        (base_dir + '/another_directory/file2.txt', '22222'),
+        (base_dir + '/another_directory/file3.txt', '33333'),
+        (base_dir + '/another_directory/file4.txt', '11111'),
+        (base_dir + '/another_directory/file5.txt', '22222'),
+        (base_dir + '/another_directory/file6.txt', '33333'),
+    ]
+
+    setup_test_data(files_to_create)
+
+    # Process files
+    main(base_dir, skip_existing=False, num_threads=2)
+    preferred_directories = [base_dir + '/preferred_directory']
+    delete_duplicates(preferred_source_directories=preferred_directories)
+
+    assert len(os.listdir(base_dir + '/preferred_directory')) == 3
+
