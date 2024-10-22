@@ -431,6 +431,8 @@ def select_original(files, preferred_source_directories=None):
                     print(f"Found match in {file} for directory {directory}")
                     preferred_directory_files.append(file)
 
+            #TODO Here loop for preferred directories is breaking if file is found in the first directory
+            # the whole list of preferred directories should be incorporated
             # We found one or more files in the preferred directory, so we can break the loop
             if preferred_directory_files:
                 break

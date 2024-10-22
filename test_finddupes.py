@@ -1,4 +1,5 @@
 import os
+import csv
 import shutil
 import xxhash
 from pathlib import Path
@@ -392,11 +393,19 @@ def test_csv_output(setup_environment):
     """
     # Create files with known content
     files_to_create = [
-        (base_dir + '/dir1/file1.txt', '00000'),
+        (base_dir + '/dir1/file1.txt', '11111'),
+        (base_dir + '/dir1/file2.txt', '22222'),
         (base_dir + '/dir2/file1.txt', '11111'),
+        (base_dir + '/dir2/file2.txt', '22222'),
         (base_dir + '/dir3/file1.txt', '11111'),
+        (base_dir + '/dir3/file2.txt', '22222'),
         (base_dir + '/dir4/file1.txt', '11111'),
+        (base_dir + '/dir4/file2.txt', '22222'),
     ]
+
+    expected_output = {'status': ['original', 'duplicate', 'duplicate', 'duplicate', 'original', 'duplicate', 'duplicate', 'duplicate'],
+                       'path': [str(Path(base_dir + '/dir1/file1.txt').resolve()), str(Path(base_dir + '/dir2/file1.txt').resolve()), str(Path(base_dir + '/dir4/file1.txt').resolve()), str(Path(base_dir + '/dir3/file1.txt').resolve()), str(Path(base_dir + '/dir1/file2.txt').resolve()), str(Path(base_dir + '/dir2/file2.txt').resolve()), str(Path(base_dir + '/dir4/file2.txt').resolve()), str(Path(base_dir + '/dir3/file2.txt').resolve())],
+                       'hash': ['3baf032d46de01d6', '3baf032d46de01d6', '3baf032d46de01d6', '3baf032d46de01d6', '63718f6861b7ee6f', '63718f6861b7ee6f', '63718f6861b7ee6f', '63718f6861b7ee6f']}
 
     setup_test_data(files_to_create)
 
@@ -404,14 +413,26 @@ def test_csv_output(setup_environment):
 
     list_duplicates_csv(
         output_file='duplicates.csv',
-        preferred_source_directories=[str(Path(base_dir + '/dir1-no_dupes').resolve())]
+        preferred_source_directories=[str(Path(base_dir + '/dir1').resolve())]
     )
     # Check that the CSV file exists and has content
     assert os.path.exists('duplicates.csv'), "CSV output file was not created."
     with open('duplicates.csv', 'r') as csvfile:
-        content = csvfile.read()
-    print (content)
-    assert 'file1.txt' in content, "CSV output does not contain expected data."
+        content = csvfile.read().split("\n")
+        header = content[0].split(',')
+
+        # Initialize the dictionary with empty lists
+        result_dict = {key: [] for key in header}
+
+        # Populate the dictionary
+        for row in content[1:]:
+            if row:
+                values = row.split(',')
+                for key, value in zip(header, values):
+                    result_dict[key].append(value)
+        print(result_dict)
+
+    assert expected_output == result_dict
 
 
 
