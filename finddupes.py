@@ -27,6 +27,14 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 
+def check_db_connection(conn):
+    try:
+        conn.cursor()
+        return True
+    except:
+        return False
+
+
 # Database Functions
 def create_db_and_table():
     """
