@@ -1,11 +1,13 @@
 import os
 import sys
+import csv
 import argparse
 import datetime
 import sqlite3
 import traceback
 import logging
 import xxhash
+import signal
 from pathlib import Path, PurePath
 from queue import Queue
 from threading import Thread, Lock
@@ -14,7 +16,6 @@ from tqdm import tqdm
 # Global list for processed data; shared between threads
 processed_data = []
 
-import signal
 
 def signal_handler(sig, frame):
     print("\nInterrupt received. Saving progress and exiting...")
@@ -22,7 +23,16 @@ def signal_handler(sig, frame):
         insert_data_batch(processed_data)
     sys.exit(0)
 
+
 signal.signal(signal.SIGINT, signal_handler)
+
+
+def check_db_connection(conn):
+    try:
+        conn.cursor()
+        return True
+    except:
+        return False
 
 
 # Database Functions
@@ -49,6 +59,7 @@ def create_db_and_table():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_hash ON files (hash)')
         conn.commit()
 
+
 def get_db_connection():
     """
     Get a connection to the SQLite database.
@@ -66,6 +77,7 @@ def get_db_connection():
     conn.commit()
     return conn
 
+
 def close_db_connection(conn):
     """
     Close the given database connection if it's open.
@@ -76,11 +88,12 @@ def close_db_connection(conn):
     if conn:
         conn.close()
 
+
 # File Processing Functions
 def process_file(file_path):
     """
     Process a single file: calculate its hash and collect metadata.
-    
+
     Args:
         file_path (str or Path): The path to the file to process.
     
@@ -115,6 +128,7 @@ def process_file(file_path):
         print(f"Error processing {file_path}: {str(e)}")
         traceback.print_exc()
         return None  # Return None if there was an error
+
 
 def worker_thread(file_queue, worker_pbar, overall_pbar, lock, thread_id):
     """
@@ -180,6 +194,7 @@ def worker_thread(file_queue, worker_pbar, overall_pbar, lock, thread_id):
     with lock:
         worker_pbar.close()
 
+
 def insert_data(data):
     """
     Insert or update a single file record in the database.
@@ -220,6 +235,7 @@ def insert_data(data):
     finally:
         close_db_connection(conn)
 
+
 def insert_data_batch(data_list):
     """
     Perform a bulk insert or update of file records in the database.
@@ -246,6 +262,7 @@ def insert_data_batch(data_list):
     finally:
         close_db_connection(conn)
 
+
 def walk_directory(directory):
     """
     Generator function to walk through a directory and yield file paths.
@@ -266,6 +283,7 @@ def walk_directory(directory):
         # Handle permission errors for directories
         dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
 
+
 def load_existing_paths():
     """
     Load existing file paths from the database into a set for quick lookup.
@@ -280,6 +298,7 @@ def load_existing_paths():
     close_db_connection(conn)
     existing_paths = set(row[0] for row in rows)
     return existing_paths
+
 
 # Duplicate Handling Functions
 def rescan_duplicates():
@@ -311,7 +330,8 @@ def rescan_duplicates():
 
     return duplicates
 
-def get_duplicates(preferred_source_directories=None, within_directory=None):
+
+def get_duplicates(preferred_source_directories=None, within_directory=None, within_multiple_directories=None):
     """
     Retrieve a list of duplicate files, optionally filtered by directory preferences and location.
 
@@ -335,6 +355,24 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
              WHERE path LIKE ?
              GROUP BY hash HAVING COUNT(*) > 1)
         ''', (f'{within_directory}%',f'{within_directory}%'))
+        all_files = cursor.fetchall()
+
+    # Added extra feature to detect duplicates only in a list of directories
+
+    elif within_multiple_directories:
+         all_files = []
+         for within_directory in within_multiple_directories:
+             within_directory = os.path.normpath(os.path.abspath(within_directory))
+             cursor.execute('''
+             SELECT hash, path FROM files WHERE path LIKE ?
+             AND hash in 
+                 (SELECT hash from files
+                  WHERE path LIKE ?
+                  GROUP BY hash HAVING COUNT(*) > 1)
+             ''', (f'{within_directory}%', f'{within_directory}%'))
+             all_files.extend(cursor.fetchall())
+
+
     else:
         # Get all files
         cursor.execute('''
@@ -343,7 +381,7 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
             (SELECT hash from files
              GROUP BY hash HAVING COUNT(*) > 1)
         ''')
-    all_files = cursor.fetchall()
+        all_files = cursor.fetchall()
 
     # Organize files by hash
     files_by_hash = {}
@@ -375,7 +413,7 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
 
     close_db_connection(conn)
     return duplicates_list
-from pathlib import PurePath
+
 
 def select_original(files, preferred_source_directories=None):
     """
@@ -395,10 +433,14 @@ def select_original(files, preferred_source_directories=None):
             print(f"Checking for original in preferred directory: {directory}")
             for file in files:
                 print(file)
-                if file.startswith(directory):
+                if "./test/" in directory:
+                    directory = f'{directory.replace("./test/", "")}/'
+                if directory in file:
                     print(f"Found match in {file} for directory {directory}")
                     preferred_directory_files.append(file)
 
+            #TODO Here loop for preferred directories is breaking if file is found in the first directory
+            # the whole list of preferred directories should be incorporated
             # We found one or more files in the preferred directory, so we can break the loop
             if preferred_directory_files:
                 break
@@ -503,6 +545,7 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
 
     return duplicates_excl_original
 
+
 def list_duplicates_csv(output_file, preferred_source_directories=None, within_directory=None):
     """
     List duplicates and originals in CSV format.
@@ -515,7 +558,6 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
     Returns:
         list: A list of dictionaries containing duplicates and original file information.
     """
-    import csv
 
     duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
     duplicates_info = []
@@ -561,8 +603,10 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
 
     return duplicates_info
 
+
 def delete_duplicates(preferred_source_directories=None, output_file=None,
-                      overwrite=False, append=False, simulate_delete=False, within_directory=None):
+                      overwrite=False, append=False, simulate_delete=False, within_directory=None,
+                      within_multiple_directories=None):
     """
     Delete duplicate files, optionally logging actions to a CSV file.
 
@@ -574,7 +618,8 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
         simulate_delete (bool): If True, do not actually delete files.
         within_directory (str): Only delete duplicates within this directory.
     """
-    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory)
+    duplicates_list = get_duplicates(preferred_source_directories=preferred_source_directories, within_directory=within_directory,
+                                     within_multiple_directories=within_multiple_directories)
     total_deleted = 0
     deleted_files = []
 
@@ -708,7 +753,6 @@ def process_batch(files, num_threads, overall_pbar):
     Returns:
         list: Processed data from the batch.
     """
-    from threading import Thread
 
     batch_processed_data = []
     threads = []
@@ -787,6 +831,7 @@ def main(directory, skip_existing=False, num_threads=None):
     overall_pbar.close()
     print("\nProcessing complete.")
 
+
 def process_file_wrapper(file_path, batch_processed_data):
     result = process_file(file_path)
     if result:
@@ -840,6 +885,7 @@ if __name__ == "__main__":
     parser_delete.add_argument('--simulate-delete', action='store_true',
                                help='Simulate deletion without actually deleting files')
     parser_delete.add_argument('--within-directory', help='Only examine duplicates within this directory')
+    parser_delete.add_argument('--within-multiple-directories', help='Only examine duplicates within these multiple directories')
 
     args = parser.parse_args()
 
@@ -904,6 +950,11 @@ if __name__ == "__main__":
             preferred_directories = None
 
         within_directory = args.within_directory
+        
+        if args.within_multiple_directories:
+            within_multiple_directories = [d.strip() for d in args.within_multiple_directories.split(',')]
+        else:
+            within_multiple_directories = None
 
         delete_duplicates(
             preferred_source_directories=preferred_directories,
@@ -911,7 +962,8 @@ if __name__ == "__main__":
             overwrite=args.overwrite,
             append=args.append,
             simulate_delete=args.simulate_delete,
-            within_directory=within_directory
+            within_directory=within_directory,
+            within_multiple_directories=within_multiple_directories,
         )
 
     else:
