@@ -353,10 +353,6 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
     unique_hashes = set(files_by_hash.keys())
     duplicates_list = []
 
-    for file_hash, paths in files_by_hash.items():
-        if len(paths) < 2:
-            continue  # Not enough files for duplicates
-
     # Process each group of duplicates
     for file_hash in unique_hashes:
         # Get the list of paths for this hash
