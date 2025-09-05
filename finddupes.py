@@ -32,6 +32,13 @@ def create_db_and_table():
     Also creates an index on the hash column for faster queries.
     """
     DB_NAME = os.environ.get('DB_NAME', 'file_data.db')
+    
+    # Let the user know if the database exists
+    if os.path.isfile(DB_NAME):
+        print(f"Database '{DB_NAME}' already exists. Using existing database.")
+        print("We will only create the table if it doesn't already exist.")
+    else:
+        print(f"Creating new database '{DB_NAME}'.")
 
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
