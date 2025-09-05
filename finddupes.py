@@ -390,6 +390,14 @@ def select_original(files, preferred_source_directories=None):
     :param preferred_source_directories: List of directories to prefer when selecting the original
     :return: Tuple containing the original file and the list of remaining files
     """
+    
+    # Handle empty files list
+    if not files:
+        return None, []
+    
+    # Handle single file
+    if len(files) == 1:
+        return files[0], []
 
     ###### Preferred directory logic ######
     preferred_directory_files = []
