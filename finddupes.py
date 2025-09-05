@@ -366,14 +366,18 @@ def get_duplicates(preferred_source_directories=None, within_directory=None):
         files = files_by_hash[file_hash]
 
         # Select the original file
-        original, duplicates = select_original(files, preferred_source_directories=preferred_source_directories)
+        original, duplicates, found_in_preferred = select_original(files, preferred_source_directories=preferred_source_directories)
+
+        # Determine if the selected original is not in any preferred directory
+        # This is true when preferred directories were specified but the original is not in any of them
+        original_not_in_preferred = preferred_source_directories is not None and not found_in_preferred
 
         # Add the duplicates to the list
         duplicates_list.append({
             'hash': file_hash,
             'original': original,
             'duplicates': duplicates,
-            'no_matching_original': False
+            'original_not_in_preferred': original_not_in_preferred
         })
 
     close_db_connection(conn)
@@ -388,19 +392,28 @@ def select_original(files, preferred_source_directories=None):
 
     :param files: List of files to check
     :param preferred_source_directories: List of directories to prefer when selecting the original
-    :return: Tuple containing the original file and the list of remaining files
+    :return: Tuple containing (original_file, remaining_files, found_in_preferred_directory)
     """
     
     # Handle empty files list
     if not files:
-        return None, []
+        return None, [], False
     
     # Handle single file
     if len(files) == 1:
-        return files[0], []
+        # Check if the single file is in preferred directory
+        found_in_preferred = False
+        if preferred_source_directories:
+            for directory in preferred_source_directories:
+                if files[0].startswith(directory):
+                    found_in_preferred = True
+                    break
+        return files[0], [], found_in_preferred
 
     ###### Preferred directory logic ######
     preferred_directory_files = []
+    found_in_preferred = False
+    
     if preferred_source_directories:
         for directory in preferred_source_directories:
             print(f"Checking for original in preferred directory: {directory}")
@@ -412,13 +425,14 @@ def select_original(files, preferred_source_directories=None):
 
             # We found one or more files in the preferred directory, so we can break the loop
             if preferred_directory_files:
+                found_in_preferred = True
                 break
 
     # If we found one and only one, it must be the original
     if len(preferred_directory_files) == 1:
         original = preferred_directory_files[0]
         files.remove(original)
-        return original, files
+        return original, files, found_in_preferred
 
     # If no preferred directory files are found, use all files
     if not preferred_directory_files:
@@ -442,7 +456,7 @@ def select_original(files, preferred_source_directories=None):
     if len(fewest_folder_files) == 1:
         original = fewest_folder_files[0]
         files.remove(original)
-        return original, files
+        return original, files, found_in_preferred
 
     ###### Shortest path logic ######
     # From the files with the fewest folders, find those with the shortest path length
@@ -459,7 +473,7 @@ def select_original(files, preferred_source_directories=None):
     if len(min_path_length_files) == 1:
         original = min_path_length_files[0]
         files.remove(original)
-        return original, files
+        return original, files, found_in_preferred
 
     ###### Alphabetical logic ######
     # Sort the files alphabetically
@@ -468,7 +482,7 @@ def select_original(files, preferred_source_directories=None):
     # Select the first file alphabetically
     original = alphabetical_files[0]
     files.remove(original)
-    return original, files
+    return original, files, found_in_preferred
 
 
 def list_duplicates_excluding_original(output_file=None, preferred_source_directories=None, within_directory=None):
@@ -491,8 +505,9 @@ def list_duplicates_excluding_original(output_file=None, preferred_source_direct
         original_file = group['original']
         duplicates = group['duplicates']
 
-        if group['no_matching_original']:
-            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
+        if group['original_not_in_preferred']:
+            print(f"Warning: Duplicate group with hash {group['hash']} has no files in preferred directories.")
+            print(f"  Selected as original (by fallback rules): {original_file}")
         else:
             print(f"Original file for duplicated hash {group['hash']}: {original_file}")
 
@@ -535,9 +550,10 @@ def list_duplicates_csv(output_file, preferred_source_directories=None, within_d
         original = group['original']
         duplicates = group['duplicates']
 
-        if group['no_matching_original']:
-            status_flag = 'duplicate - no matching original'
-            print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
+        if group['original_not_in_preferred']:
+            status_flag = 'original (fallback - not in preferred dir)'
+            print(f"Warning: Duplicate group with hash {group['hash']} has no files in preferred directories.")
+            print(f"  Selected as original (by fallback rules): {original}")
         else:
             status_flag = 'original'
             print(f"Original file for hash {group['hash']}: {original}")
@@ -622,9 +638,10 @@ def delete_duplicates(preferred_source_directories=None, output_file=None,
         for group in duplicates_list:
             original_path = group['original']
 
-            if group['no_matching_original']:
-                status_flag = 'kept - no matching original'
-                print(f"Duplicate group with hash {group['hash']} has no matching original in specified directories.")
+            if group['original_not_in_preferred']:
+                status_flag = 'kept (fallback - not in preferred dir)'
+                print(f"Warning: Duplicate group with hash {group['hash']} has no files in preferred directories.")
+                print(f"  Selected as original (by fallback rules): {original_path}")
             else:
                 status_flag = 'kept'
                 print(f"Original file for hash {group['hash']}: {original_path}")
